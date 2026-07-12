@@ -1,0 +1,15 @@
+{
+  "name": "pingen-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Pingen v2 — send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
+  "type": "module",
+  "bin": { "pingen-mcp": "index.js" },
+  "main": "index.js",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "license": "MIT",
+  "author": "sapn95",
+  "repository": { "type": "git", "url": "git+https://github.com/sapn95/pingen-mcp.git" }
+}
