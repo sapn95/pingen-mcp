@@ -13,7 +13,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -87,6 +87,8 @@ const TOOLS = [
   { name: 'pingen_get_letter', description: 'Get one letter status/tracking by id.', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_cancel_letter', description: 'Cancel a letter that has already been submitted/sent (where cancellable).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_delete_letter', description: 'Delete a draft / not-yet-sent letter (removes it from the dashboard).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
+  { name: 'pingen_letter_events', description: 'Tracking/status history of a letter (created, submitted, sent, delivered, undeliverable …).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
+  { name: 'pingen_download_letter', description: 'Download the letter PDF to output_path (available once the letter is processed/sent).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, output_path: { type: 'string' } }, required: ['letter_id', 'output_path'] } },
 ];
 
 const server = new Server({ name: 'pingen-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
@@ -132,6 +134,26 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     if (name === 'pingen_delete_letter') {
       await api('DELETE', `/organisations/${oid}/deliveries/letters/${args.letter_id}`);
       return text({ deleted: args.letter_id });
+    }
+    if (name === 'pingen_letter_events') {
+      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${args.letter_id}/events?sort=-emitted_at`);
+      return text({ events: (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data })) });
+    }
+    if (name === 'pingen_download_letter') {
+      const r = await api('GET', `/organisations/${oid}/deliveries/letters/${args.letter_id}/file`, { raw: true });
+      const ct = r.headers.get('content-type') || '';
+      let bytes;
+      if (ct.includes('pdf') || ct.includes('octet-stream')) {
+        bytes = Buffer.from(await r.arrayBuffer());
+      } else {
+        const j = JSON.parse(await r.text());
+        const url = j.data?.attributes?.url || j.url;
+        if (!url) throw new Error('Kein Datei-URL in der Antwort (Brief evtl. noch nicht verarbeitet).');
+        const f = await fetch(url); if (!f.ok) throw new Error(`Datei-Download ${f.status}`);
+        bytes = Buffer.from(await f.arrayBuffer());
+      }
+      writeFileSync(args.output_path, bytes);
+      return text({ saved: args.output_path, bytes: bytes.length });
     }
     return text({ error: `unknown tool ${name}` });
   } catch (e) {

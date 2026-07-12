@@ -32,7 +32,10 @@ Env-var alternative: `PINGEN_CLIENT_ID`, `PINGEN_CLIENT_SECRET`,
 | `pingen_send_letter` | upload a PDF and create a letter — **DRAFT by default** (`auto_send=false`) |
 | `pingen_submit_letter` | send an existing draft with a delivery product (physically mails it) |
 | `pingen_get_letter` | status/tracking of one letter |
-| `pingen_cancel_letter` | cancel a not-yet-sent letter |
+| `pingen_cancel_letter` | cancel a submitted letter (where cancellable) |
+| `pingen_delete_letter` | delete a draft / not-yet-sent letter |
+| `pingen_letter_events` | tracking history (created → submitted → sent → delivered …) |
+| `pingen_download_letter` | download the letter PDF (once processed/sent) |
 
 ### Safety
 
