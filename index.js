@@ -83,7 +83,7 @@ const TOOLS = [
       address_position: { type: 'string', enum: ['left', 'right'], description: 'window position of the address on the first page (default left)' },
       auto_send: { type: 'boolean', description: 'default false = create draft only' },
     }, required: ['file_path'] } },
-  { name: 'pingen_submit_letter', description: 'Send an existing DRAFT letter with a delivery product (this physically mails it).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, delivery_product: { type: 'string' } }, required: ['letter_id', 'delivery_product'] } },
+  { name: 'pingen_submit_letter', description: 'Send an existing DRAFT letter with a delivery product (this physically mails it). Optional print_mode (simplex/duplex) and print_spectrum (color/grayscale).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, delivery_product: { type: 'string' }, print_mode: { type: 'string' }, print_spectrum: { type: 'string' } }, required: ['letter_id', 'delivery_product'] } },
   { name: 'pingen_get_letter', description: 'Get one letter status/tracking by id.', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_cancel_letter', description: 'Cancel a letter that has already been submitted/sent (where cancellable).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_delete_letter', description: 'Delete a draft / not-yet-sent letter (removes it from the dashboard).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
@@ -124,7 +124,8 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       return text({ created: letterRow(d.data), note: attributes.auto_send ? 'auto_send=true → wird versandt' : 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.' });
     }
     if (name === 'pingen_submit_letter') {
-      const d = await api('POST', `/organisations/${oid}/deliveries/letters/${args.letter_id}/send`, { json: { data: { id: args.letter_id, type: 'letters', attributes: { delivery_product: args.delivery_product } } } });
+      const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
+      const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${args.letter_id}/send`, { json: { data: { id: args.letter_id, type: 'letters', attributes } } });
       return text({ submitted: letterRow(d.data) });
     }
     if (name === 'pingen_cancel_letter') {
