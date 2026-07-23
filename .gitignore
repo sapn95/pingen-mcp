@@ -1,4 +1,11 @@
 node_modules/
 *.log
 .DS_Store
+
+# Credentials must never be committed — they live in the macOS keychain / env vars.
+.env
 *.env
+.env.*
+*.pem
+*.key
+secrets.json

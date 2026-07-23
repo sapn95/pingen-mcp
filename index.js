@@ -91,7 +91,7 @@ const TOOLS = [
   { name: 'pingen_download_letter', description: 'Download the letter PDF to output_path (available once the letter is processed/sent).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, output_path: { type: 'string' } }, required: ['letter_id', 'output_path'] } },
 ];
 
-const server = new Server({ name: 'pingen-mcp', version: '0.1.0' }, { capabilities: { tools: {} } });
+const server = new Server({ name: 'pingen-mcp', version: '0.2.1' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
 server.setRequestHandler(CallToolRequestSchema, async req => {
