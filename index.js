@@ -17,6 +17,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// Name and version come from package.json, never from a second copy here:
+// `npm version` only bumps package.json, so a hardcoded string silently
+// advertises a stale version to every client.
+const PKG = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+
 const API = process.env.PINGEN_API_BASE || 'https://api.pingen.com';
 
 function keychain(service) {
@@ -91,7 +96,7 @@ const TOOLS = [
   { name: 'pingen_download_letter', description: 'Download the letter PDF to output_path (available once the letter is processed/sent).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, output_path: { type: 'string' } }, required: ['letter_id', 'output_path'] } },
 ];
 
-const server = new Server({ name: 'pingen-mcp', version: '0.2.1' }, { capabilities: { tools: {} } });
+const server = new Server({ name: PKG.name, version: PKG.version }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
 server.setRequestHandler(CallToolRequestSchema, async req => {
