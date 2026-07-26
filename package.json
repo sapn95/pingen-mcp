@@ -22,6 +22,16 @@
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
     "hygiene": "node scripts/hygiene.mjs",
-    "test": "node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs"
+    "test": "node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs",
+    "prepublishOnly": "node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
