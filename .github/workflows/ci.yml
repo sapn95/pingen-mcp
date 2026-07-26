@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Syntax
+        run: node --check index.js
+
+      # Protocol handshake + tool-schema validation. Offline: no network, no
+      # credentials, no browser download, so it is safe on a public runner.
+      - name: Smoke test
+        run: node scripts/smoke.mjs
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
+      - name: Hygiene (secrets, personal data, tracked state files)
+        run: node scripts/hygiene.mjs
+
+      - name: Audit
+        run: npm audit --audit-level=high
+        continue-on-error: true
