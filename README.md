@@ -224,6 +224,58 @@ and check the address preview before submitting.
 
 ---
 
+## Releasing
+
+Published from CI with **npm Trusted Publishing** (OIDC) — there is no npm token
+anywhere: no secret to store, rotate or leak. npm recommends this over an
+automation token, and is restricting tokens that bypass 2FA.
+
+One-time setup per package, on npmjs.com -> the package -> Settings ->
+Trusted Publisher:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | sapn95 |
+| Repository | pingen-mcp |
+| Workflow filename | release.yml |
+| Allowed actions | npm publish |
+
+The workflow filename must match exactly. That is deliberate: it stops any other
+workflow in the repo from publishing under your name.
+
+Then every release is one command:
+
+    npm version patch && git push --follow-tags
+
+The tag triggers the release workflow: it upgrades npm (trusted publishing needs
+>= 11.5.1 and Node >= 22.14), refuses a tag whose version disagrees with
+package.json, runs the gate, and publishes with a signed provenance statement.
+
+### If the publish fails with 404
+
+    npm notice publish Signed provenance statement ... from GitHub Actions
+    npm error 404 Not Found - PUT https://registry.npmjs.org/pingen-mcp
+
+Provenance was signed, so OIDC worked — the registry simply does not accept this
+workflow as a publisher yet. That means the **trusted publisher is not configured**,
+or the repository / workflow name does not match. npm answers 404 rather than 403
+so as not to reveal whether the package exists. It is not a credential problem:
+there is no credential, by design.
+
+## Checks
+
+    npm test
+
+Runs exactly what CI runs, offline and without credentials: a syntax check, the
+protocol smoke test and the hygiene scan.
+
+The smoke test completes the MCP handshake over stdio and asserts the things that
+have actually broken here — a server version drifting from package.json, a tool
+in the dispatcher but missing from the tool list (or advertised and unhandled), a
+required property absent from a schema, and descriptions too thin to choose a
+tool from. The hygiene scan refuses secrets, tracked session files and personal
+identifiers.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
