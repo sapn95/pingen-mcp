@@ -1,7 +1,7 @@
 {
   "name": "pingen-mcp",
-  "version": "0.2.1",
-  "description": "MCP server for Pingen v2 \u2014 send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
+  "version": "0.2.2",
+  "description": "MCP server for Pingen v2 — send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
   "type": "module",
   "bin": {
     "pingen-mcp": "index.js"
