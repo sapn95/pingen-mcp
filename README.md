@@ -1,5 +1,8 @@
 # pingen-mcp
 
+[![npm](https://img.shields.io/npm/v/pingen-mcp?logo=npm)](https://www.npmjs.com/package/pingen-mcp)
+[![CI](https://github.com/sapn95/pingen-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sapn95/pingen-mcp/actions/workflows/ci.yml)
+
 MCP server for [Pingen v2](https://pingen.com) — send real, physical letters
 (**A-Post / B-Post / registered / Einschreiben**) from a PDF and track them,
 straight from any MCP client (Claude Code, Claude Desktop, …). It talks to the
