@@ -1,6 +1,6 @@
 {
   "name": "pingen-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "MCP server for Pingen v2 — send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
   "type": "module",
   "bin": {
@@ -8,10 +8,10 @@
   },
   "main": "index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "license": "MIT",
   "author": "sapn95",
@@ -33,5 +33,8 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.12"
   }
 }
