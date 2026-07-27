@@ -1,8 +1,20 @@
+<div align="center">
+
 # pingen-mcp
 
-[![npm](https://img.shields.io/npm/v/pingen-mcp?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/pingen-mcp) [![CI](https://img.shields.io/github/actions/workflow/status/sapn95/pingen-mcp/ci.yml?branch=main&logo=github&label=CI)](https://github.com/sapn95/pingen-mcp/actions/workflows/ci.yml) [![node](https://img.shields.io/node/v/pingen-mcp?logo=node.js&logoColor=white&color=5FA04E)](https://nodejs.org) [![licence](https://img.shields.io/npm/l/pingen-mcp?color=blue)](LICENSE)
+Send physical letters — A-Post, B-Post, registered — straight from a PDF via the **Pingen v2** API.
 
-**Send physical letters — A-Post, B-Post, registered — from a PDF via the Pingen v2 API.**
+[![npm](https://img.shields.io/npm/v/pingen-mcp?style=flat-square&logo=npm&logoColor=white&label=npm&color=CB3837)](https://www.npmjs.com/package/pingen-mcp)
+&nbsp;
+[![CI](https://img.shields.io/github/actions/workflow/status/sapn95/pingen-mcp/ci.yml?branch=main&style=flat-square&logo=github&logoColor=white&label=CI)](https://github.com/sapn95/pingen-mcp/actions/workflows/ci.yml)
+&nbsp;
+[![node](https://img.shields.io/node/v/pingen-mcp?style=flat-square&logo=nodedotjs&logoColor=white&color=5FA04E)](https://nodejs.org)
+&nbsp;
+[![licence](https://img.shields.io/npm/l/pingen-mcp?style=flat-square&color=4C5B5C)](LICENSE)
+
+</div>
+
+---
 
 MCP server for [Pingen v2](https://pingen.com) — send real, physical letters
 (**A-Post / B-Post / registered / Einschreiben**) from a PDF and track them,
