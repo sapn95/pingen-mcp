@@ -3,7 +3,7 @@
 // fake, so the worst a bug can do is post a letter to a mock.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start, ORG } from './mock-pingen.mjs';
@@ -246,6 +246,9 @@ describe('downloads', () => {
     assert.ok(existsSync(p));
     assert.match(readFileSync(p, 'utf8'), /^%PDF/);
     assert.equal(data.bytes, readFileSync(p).length);
+    // A letter is correspondence. Written with the process umask it lands
+    // -rw-r--r-- on a normal account: every local user can read the post.
+    assert.equal(statSync(p).mode & 0o777, 0o600, `saved as ${(statSync(p).mode & 0o777).toString(8)}`);
   });
 
   test('follows the pointer when the API answers with a URL instead', async () => {
