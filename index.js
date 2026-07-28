@@ -3,12 +3,14 @@
 // letters (A-Post / B-Post / registered / Einschreiben) from a PDF via the
 // Pingen REST API, and track their status.
 //
-// Auth: OAuth2 client_credentials. Credentials are read from env or, on macOS,
-// from the login keychain (service names pingen-mcp-client-id /
-// -client-secret / -org-uuid). NEVER commit credentials.
+// Auth: OAuth2 client_credentials against the API host — the same
+// host from the API itself. Credentials are read from env or, on macOS, from
+// the login keychain (service names pingen-mcp-client-id / -client-secret /
+// -org-uuid). NEVER commit credentials.
 //
-// Safety: send_letter creates a DRAFT by default (auto_send=false). Nothing is
-// physically mailed until submit_letter is called explicitly.
+// Safety: send_letter creates a DRAFT (auto_send=false) unless the caller
+// explicitly passes auto_send:true. Short of that one opt-in, nothing is
+// physically mailed until submit_letter is called.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -22,61 +24,184 @@ import { execFileSync } from 'node:child_process';
 // advertises a stale version to every client.
 const PKG = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
-const API = process.env.PINGEN_API_BASE || 'https://api.pingen.com';
-
 function keychain(service) {
   try {
     return execFileSync('security', ['find-generic-password', '-a', 'pingen', '-s', service, '-w'], { encoding: 'utf8' }).trim();
   } catch { return ''; }
 }
-const CLIENT_ID = process.env.PINGEN_CLIENT_ID || keychain('pingen-mcp-client-id');
-const CLIENT_SECRET = process.env.PINGEN_CLIENT_SECRET || keychain('pingen-mcp-client-secret');
-let ORG = process.env.PINGEN_ORG_UUID || keychain('pingen-mcp-org-uuid');
 
-let token = null, tokenExp = 0;
+// A variable that is *set* wins, even when it is empty. Written as
+// `process.env.X || keychain(...)` an empty variable falls through to the login
+// keychain, so a test run or a container that deliberately blanks a credential
+// silently authenticates as the real account instead of failing.
+const envOrKeychain = (name, service) =>
+  (process.env[name] !== undefined ? process.env[name] : keychain(service)).trim();
+
+// The token endpoint lives on the SAME host as the resources for this account:
+// POST {API}/auth/access-tokens, verified live. The official SDK mints tokens on
+// identity.pingen.com instead, and following it here broke authentication
+// outright — the split is real for some Pingen setups but not for this one.
+// PINGEN_AUTH_BASE exists to point somewhere else when that is genuinely needed,
+// and for tests; it defaults to the API host because that is what works.
+//
+// Same set-wins rule as above for both: a blank base must not quietly resolve
+// to production. It stays blank and every call fails loudly.
+function base(name, fallback) {
+  let b = (process.env[name] ?? fallback).trim();
+  while (b.endsWith('/')) b = b.slice(0, -1);
+  return b;
+}
+const API = base('PINGEN_API_BASE', 'https://api.pingen.com');
+const AUTH = base('PINGEN_AUTH_BASE', API);
+// Which variable actually determined the auth host — so an error names the one
+// the reader has to change, not the one that merely exists.
+const AUTH_VAR = process.env.PINGEN_AUTH_BASE !== undefined ? 'PINGEN_AUTH_BASE' : 'PINGEN_API_BASE';
+const target = (b, name, path) => {
+  if (!b) throw new Error(`${name} ist gesetzt, aber leer — kein Ziel für ${path}.`);
+  return b + path;
+};
+const apiUrl = path => target(API, 'PINGEN_API_BASE', path);
+const authUrl = path => target(AUTH, AUTH_VAR, path);
+
+// Every request goes through here, so every request is bounded: a stalled
+// endpoint fails the tool call instead of hanging the client for ever. 20s is
+// what the official SDK allows; moving actual bytes gets longer.
+const TIMEOUT_MS = 20000;
+const TRANSFER_TIMEOUT_MS = 120000;
+async function http(what, resource, { timeout = TIMEOUT_MS, ...init } = {}) {
+  try {
+    return await fetch(resource, { ...init, signal: AbortSignal.timeout(timeout) });
+  } catch (e) {
+    // Keep the original as `cause`: the friendly message says what failed, the
+    // cause still says why, which is what you need when debugging a network error.
+    if (e?.name === 'TimeoutError') throw new Error(`${what}: Zeitüberschreitung nach ${timeout / 1000}s.`, { cause: e });
+    throw new Error(`${what}: ${e?.message || String(e)}`, { cause: e });
+  }
+}
+
+const CLIENT_ID = envOrKeychain('PINGEN_CLIENT_ID', 'pingen-mcp-client-id');
+const CLIENT_SECRET = envOrKeychain('PINGEN_CLIENT_SECRET', 'pingen-mcp-client-secret');
+let ORG = envOrKeychain('PINGEN_ORG_UUID', 'pingen-mcp-org-uuid');
+
+let token = null, tokenExp = 0, pendingToken = null;
+
+// A tool result is handed straight to the model, and an upstream error body can
+// quote the request that produced it — Pingen's token endpoint does exactly
+// that. Strip anything secret out of every string that leaves this process, in
+// each form it could have travelled in: raw, JSON-escaped, percent-encoded.
+function redact(s) {
+  let out = String(s ?? '');
+  for (const v of [CLIENT_SECRET, CLIENT_ID, token]) {
+    // Short values are left alone deliberately: a 4-character string is far
+    // more likely to be ordinary text than a credential, and mangling every
+    // occurrence of it would make errors unreadable. Real Pingen credentials
+    // are long. Note this masks values we hold verbatim — an upstream that
+    // echoes a credential in pieces or re-encoded some other way cannot be
+    // caught by string matching, which is why the token endpoint's body is
+    // never forwarded at all (see requestToken).
+    if (typeof v !== 'string' || v.length < 8) continue;
+    for (const form of new Set([v, JSON.stringify(v).slice(1, -1), encodeURIComponent(v), encodeURIComponent(v).replaceAll('%20', '+')])) {
+      out = out.split(form).join('***');
+    }
+  }
+  return out;
+}
+// Redact first, cut second: truncating a body mid-credential would leave a
+// fragment no longer matching anything the redactor knows about.
+const excerpt = (s, n) => redact(s).slice(0, n);
+
 async function accessToken() {
   if (token && Date.now() < tokenExp - 60000) return token;
+  // One grant at a time: parallel tool calls would otherwise each open their own.
+  pendingToken ??= requestToken().finally(() => { pendingToken = null; });
+  return pendingToken;
+}
+async function requestToken() {
   if (!CLIENT_ID || !CLIENT_SECRET) throw new Error('Keine Pingen-Credentials (env oder Keychain pingen-mcp-client-id/-secret).');
   const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: CLIENT_ID, client_secret: CLIENT_SECRET });
-  const r = await fetch(`${API}/auth/access-tokens`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
-  if (!r.ok) throw new Error(`Token-Fehler ${r.status}: ${await r.text()}`);
+  const r = await http('Token', authUrl('/auth/access-tokens'), {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+  });
+  // The body of a failed grant is the one response that is *made* of the
+  // credentials we just sent, so only its status and the OAuth error code get
+  // out — never the free-text detail.
+  if (!r.ok) {
+    const code = await r.json().then(j => j?.error, () => null);
+    throw new Error(`Token-Fehler ${r.status}${code ? ` (${String(code).slice(0, 40)})` : ''} von ${AUTH}.`);
+  }
   const j = await r.json();
-  token = j.access_token; tokenExp = Date.now() + (j.expires_in || 43200) * 1000;
+  if (typeof j.access_token !== 'string' || !j.access_token) throw new Error('Token-Antwort ohne access_token.');
+  token = j.access_token; tokenExp = Date.now() + (Number(j.expires_in) || 43200) * 1000;
   return token;
 }
 
-async function api(method, path, { json, raw } = {}) {
+async function api(method, path, { json, raw, retry = true } = {}) {
   const headers = { Authorization: `Bearer ${await accessToken()}`, Accept: 'application/vnd.api+json' };
   let bodyInit;
   if (json !== undefined) { headers['Content-Type'] = 'application/vnd.api+json'; bodyInit = JSON.stringify(json); }
-  const r = await fetch(`${API}${path}`, { method, headers, body: bodyInit });
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${(await r.text()).slice(0, 500)}`);
+  const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
+  // A 401 means the request was refused before it did anything, so retrying it
+  // once with a fresh token is safe even for a mutation — and it is the
+  // difference between a revoked token costing one call and costing every call
+  // until the process restarts.
+  if (r.status === 401 && retry) {
+    token = null; tokenExp = 0;
+    return api(method, path, { json, raw, retry: false });
+  }
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
   if (raw) return r;
   const txt = await r.text();
   return txt ? JSON.parse(txt) : {};
 }
 
-async function orgId() {
-  if (ORG) return ORG;
+// Discovered once and remembered, and — like the token — looked up only once
+// even if several tool calls arrive together.
+let pendingOrg = null;
+function orgId() {
+  if (ORG) return Promise.resolve(ORG);
+  pendingOrg ??= discoverOrg().finally(() => { pendingOrg = null; });
+  return pendingOrg;
+}
+async function discoverOrg() {
   const d = await api('GET', '/organisations');
-  ORG = d.data?.[0]?.id;
-  if (!ORG) throw new Error('Keine Organisation gefunden.');
+  const orgs = d.data || [];
+  if (!orgs.length) throw new Error('Keine Organisation gefunden.');
+  // Only auto-select when there is nothing to choose. With several, taking the
+  // first one off a collection would decide — silently — which account pays for
+  // and franks the letter.
+  if (orgs.length > 1) {
+    throw new Error(`${orgs.length} Organisationen — PINGEN_ORG_UUID setzen: ${orgs.map(o => `${o.id} (${o.attributes?.name})`).join(', ')}`);
+  }
+  ORG = orgs[0].id;
   return ORG;
 }
 
-// Upload a local PDF: GET /file-upload → PUT bytes → returns {url, signature}
+// Upload a local PDF: GET /file-upload → PUT bytes → returns {url, signature}.
+// The file is read and checked first, so a wrong path is refused before its
+// bytes leave the machine rather than after Pingen has seen them.
 async function uploadFile(filePath) {
-  const up = await api('GET', '/file-upload');
-  const { url, url_signature } = up.data.attributes;
   const bytes = readFileSync(filePath);
-  const put = await fetch(url, { method: 'PUT', body: bytes });
-  if (!put.ok) throw new Error(`PUT file → ${put.status}: ${(await put.text()).slice(0, 300)}`);
+  // A signature check, not a validity check: it catches the wrong path — a key,
+  // a dump, a text file — before its bytes leave the machine. Whether the PDF
+  // is a mailable letter is still Pingen's call.
+  if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    throw new Error(`Keine PDF-Datei (Signatur %PDF- fehlt): ${basename(filePath)}`);
+  }
+  const up = await api('GET', '/file-upload');
+  const { url, url_signature } = up.data?.attributes || {};
+  if (!url || !url_signature) throw new Error('Upload-Slot ohne URL/Signatur erhalten.');
+  // application/pdf is what the signed slot is issued for, and what the
+  // official client sends; without it the bucket can refuse the object.
+  const put = await http('PUT file', url, {
+    method: 'PUT', body: bytes, headers: { 'Content-Type': 'application/pdf' }, timeout: TRANSFER_TIMEOUT_MS,
+  });
+  if (!put.ok) throw new Error(`PUT file → ${put.status}: ${excerpt(await put.text(), 300)}`);
   return { file_url: url, file_url_signature: url_signature };
 }
 
 function letterRow(d) {
-  const a = d.attributes || {};
-  return { id: d.id, status: a.status, delivery_product: a.delivery_product, recipient: a.address, tracking: a.tracking_number, pages: a.file_pages, submitted: a.submitted_at, price: a.price_currency ? `${a.price_value} ${a.price_currency}` : undefined };
+  const a = d?.attributes || {};
+  return { id: d?.id, status: a.status, delivery_product: a.delivery_product, recipient: a.address, tracking: a.tracking_number, pages: a.file_pages, submitted: a.submitted_at, price: a.price_currency ? `${a.price_value} ${a.price_currency}` : undefined };
 }
 
 const TOOLS = [
@@ -101,7 +226,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
 server.setRequestHandler(CallToolRequestSchema, async req => {
   const { name, arguments: args = {} } = req.params;
-  const text = s => ({ content: [{ type: 'text', text: typeof s === 'string' ? s : JSON.stringify(s, null, 1) }] });
+  const text = s => ({ content: [{ type: 'text', text: redact(typeof s === 'string' ? s : JSON.stringify(s, null, 1)) }] });
   try {
     if (name === 'pingen_status') {
       const d = await api('GET', '/organisations');
@@ -163,7 +288,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     }
     return text({ error: `unknown tool ${name}` });
   } catch (e) {
-    return { content: [{ type: 'text', text: 'ERROR: ' + (e.message || String(e)) }], isError: true };
+    return { content: [{ type: 'text', text: redact('ERROR: ' + (e.message || String(e))) }], isError: true };
   }
 });
 

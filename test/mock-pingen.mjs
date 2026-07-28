@@ -1,0 +1,194 @@
+// A stand-in for api.pingen.com, so the whole server can be exercised without
+// an account and — the point of the exercise — without ever putting a letter in
+// the post. It speaks the shapes the real v2 API returns: JSON:API envelopes,
+// the two-step file upload (GET a signed slot, PUT the bytes), and a /send that
+// only answers PATCH.
+//
+// Two endpoints are deliberately hostile, because real ones are: a rejected
+// token grant quotes the client_secret it was given back at you, and one letter
+// returns a 500 whose body contains the bearer token. Nothing of either may
+// reach a tool result.
+import { createServer } from 'node:http';
+
+export const ORG = 'org-test-1';
+export const TOKEN = 'tok-pingen-abcdef123456';
+
+const letter = (id, over = {}) => ({
+  id,
+  type: 'letters',
+  attributes: {
+    status: 'sent',
+    delivery_product: 'fast',
+    address: 'Muster AG\nBahnhofstrasse 1\n3000 Bern',
+    tracking_number: '98.12.345678.90',
+    file_pages: 2,
+    submitted_at: '2026-07-01T09:15:00+00:00',
+    price_value: 1.85,
+    price_currency: 'CHF',
+    ...over,
+  },
+});
+
+export function start({ tokenStatus = 200, tokenBody = null } = {}) {
+  const state = {
+    calls: [],            // "METHOD /path", in order
+    urls: [],             // the same requests with their query string
+    authHeaders: [],      // every Authorization header the API saw
+    tokenGrants: 0,
+    uploads: [],          // { slot, bytes }
+    created: [],          // attributes of every POSTed letter
+    submitted: [],        // { id, attributes } of every PATCH .../send
+    cancelled: [],
+    deleted: [],
+    uploadStatus: 200,    // flip to fail the PUT of the bytes
+    slotBroken: false,    // flip to hand out a slot without a URL
+    orgs: [{ id: ORG, type: 'organisations', attributes: { name: 'Test Org', plan: 'free', status: 'active' } }],
+    letters: [
+      letter('ltr-1'),
+      letter('ltr-2', { status: 'draft', tracking_number: null, submitted_at: null, price_value: null, price_currency: null }),
+      letter('ltr-3'),
+      letter('ltr-leak'),
+    ],
+  };
+
+  let base = '';
+  const bearerOk = req => (req.headers.authorization || '') === `Bearer ${TOKEN}`;
+  const srv = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const p = url.pathname;
+    state.calls.push(`${req.method} ${p}`);
+    state.urls.push(`${req.method} ${req.url}`);
+    const send = (code, body, type = 'application/vnd.api+json') => {
+      res.writeHead(code, { 'Content-Type': type });
+      res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+    };
+    const read = () => new Promise(resolve => {
+      const chunks = [];
+      req.on('data', c => chunks.push(c));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+
+    // --- OAuth2 client_credentials ------------------------------------------
+    if (p === '/auth/access-tokens') {
+      if (req.method !== 'POST') return send(405, { error: 'method_not_allowed' });
+      const rawBody = (await read()).toString();
+      const form = new URLSearchParams(rawBody);
+      state.tokenGrants++;
+      if (tokenStatus !== 200 || tokenBody) {
+        // Exactly the unhelpful thing a real authorisation server does: quote
+        // the offending credential back — once JSON-escaped in a message, once
+        // percent-encoded in an echo of the request body.
+        return send(tokenStatus, tokenBody ?? JSON.stringify({
+          error: 'invalid_client',
+          hint: `secret ${form.get('client_secret')} rejected`,
+          request_body: rawBody,
+        }));
+      }
+      if (form.get('grant_type') !== 'client_credentials' || !form.get('client_id') || !form.get('client_secret')) {
+        return send(400, { error: 'invalid_request' });
+      }
+      return send(200, { access_token: TOKEN, token_type: 'bearer', expires_in: 3600 });
+    }
+
+    // --- the signed upload slot, and the bucket it points at -----------------
+    if (p === '/file-upload' && req.method === 'GET') {
+      if (!bearerOk(req)) return send(401, { error: 'unauthorized' });
+      state.authHeaders.push(req.headers.authorization || '');
+      if (state.slotBroken) return send(200, { data: { type: 'file_uploads', attributes: {} } });
+      return send(200, { data: { type: 'file_uploads', attributes: { url: `${base}/upload-slot/slot-1`, url_signature: 'sig-1' } } });
+    }
+    if (p.startsWith('/upload-slot/') && req.method === 'PUT') {
+      const bytes = await read();
+      if (state.uploadStatus !== 200) return send(state.uploadStatus, 'upload rejected', 'text/plain');
+      state.uploads.push({ slot: p.slice('/upload-slot/'.length), bytes });
+      return send(200, '', 'text/plain');
+    }
+    if (p.startsWith('/blob/') && req.method === 'GET') {
+      return send(200, Buffer.from('%PDF-1.7 fetched-from-blob'), 'application/pdf');
+    }
+
+    // --- everything else needs the bearer token ------------------------------
+    if (!bearerOk(req)) return send(401, { error: 'unauthorized' });
+    state.authHeaders.push(req.headers.authorization || '');
+
+    if (p === '/organisations' && req.method === 'GET') return send(200, { data: state.orgs });
+
+    const m = /^\/organisations\/([^/]+)\/deliveries\/letters(?:\/([^/]+))?(?:\/(\w+))?$/.exec(p);
+    if (!m) return send(404, { error: 'no_route', path: p });
+    const [, oid, id, tail] = m;
+    if (oid !== ORG) return send(404, { error: 'unknown_organisation', id: oid });
+
+    if (!id) {
+      if (req.method === 'GET') {
+        const limit = Number(url.searchParams.get('page[limit]') || 20);
+        return send(200, { data: state.letters.slice(0, limit) });
+      }
+      if (req.method === 'POST') {
+        const body = JSON.parse((await read()).toString() || '{}');
+        const attributes = body.data?.attributes || {};
+        state.created.push(attributes);
+        const created = letter(`ltr-new-${state.created.length}`, {
+          ...attributes,
+          status: attributes.auto_send ? 'processing' : 'draft',
+          tracking_number: null,
+          submitted_at: attributes.auto_send ? '2026-07-27T10:00:00+00:00' : null,
+        });
+        state.letters.push(created);
+        return send(201, { data: created });
+      }
+      return send(405, { error: 'method_not_allowed' });
+    }
+
+    const known = state.letters.find(l => l.id === id);
+    if (!known) return send(404, { error: 'not_found', id });
+
+    // The letter that makes the upstream fail loudly, token and all.
+    if (id === 'ltr-leak' && tail !== 'file') {
+      return send(500, `{"error":"internal","request":{"authorization":"${req.headers.authorization}"}}`);
+    }
+
+    if (tail === 'send') {
+      // The real API only accepts PATCH here; a POST must not silently work.
+      if (req.method !== 'PATCH') return send(405, { error: 'method_not_allowed', allowed: ['PATCH'] });
+      const body = JSON.parse((await read()).toString() || '{}');
+      state.submitted.push({ id, attributes: body.data?.attributes || {} });
+      known.attributes = { ...known.attributes, ...body.data?.attributes, status: 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
+      return send(200, { data: known });
+    }
+    if (tail === 'cancel') {
+      if (req.method !== 'PATCH') return send(405, { error: 'method_not_allowed', allowed: ['PATCH'] });
+      state.cancelled.push(id);
+      known.attributes.status = 'cancelled';
+      return send(204, '');
+    }
+    if (tail === 'events' && req.method === 'GET') {
+      return send(200, { data: [
+        { id: 'ev-1', type: 'letter_events', attributes: { type: 'letter.created', emitted_at: '2026-07-01T09:00:00+00:00', data: { by: 'api' } } },
+        { id: 'ev-2', type: 'letter_events', attributes: { type: 'letter.sent', emitted_at: '2026-07-01T09:30:00+00:00', data: null } },
+      ] });
+    }
+    if (tail === 'file' && req.method === 'GET') {
+      // Three shapes the API is known to answer with, all of which the tool
+      // has to cope with: the bytes, a pointer to them, or neither.
+      if (id === 'ltr-1') return send(200, Buffer.from('%PDF-1.4 direct-bytes'), 'application/pdf');
+      if (id === 'ltr-2') return send(200, { data: { attributes: { url: `${base}/blob/${id}.pdf` } } }, 'application/json');
+      return send(200, { data: { attributes: {} } }, 'application/json');
+    }
+    if (!tail) {
+      if (req.method === 'GET') return send(200, { data: known });
+      if (req.method === 'DELETE') {
+        state.deleted.push(id);
+        state.letters = state.letters.filter(l => l.id !== id);
+        return send(204, '');
+      }
+    }
+    return send(404, { error: 'no_route', path: p, method: req.method });
+  });
+
+  return new Promise(resolve => {
+    srv.listen(0, '127.0.0.1', () => {
+      base = `http://127.0.0.1:${srv.address().port}`;
+      resolve({ base, state, close: () => new Promise(r => srv.close(r)) });
+    });
+  });
+}

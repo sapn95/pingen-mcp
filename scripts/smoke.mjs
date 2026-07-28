@@ -19,7 +19,13 @@ const entry = join(root, pkg.main || 'index.js');
 const fail = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'}  ${what}`); if (!ok) fail.push(what); };
 
-const child = spawn(process.execPath, [entry], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env } });
+// Hermetic on purpose: a set-but-empty variable is authoritative, so the server
+// neither reads the developer's login keychain nor has an endpoint to call. If
+// this check ever grew a tool call, it still could not reach api.pingen.com.
+const child = spawn(process.execPath, [entry], {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  env: { ...process.env, PINGEN_CLIENT_ID: '', PINGEN_CLIENT_SECRET: '', PINGEN_ORG_UUID: '', PINGEN_API_BASE: '' },
+});
 let stderr = '';
 child.stderr.on('data', d => { stderr += d.toString(); });
 

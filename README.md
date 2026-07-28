@@ -30,7 +30,7 @@ committed.
 
 ## Prerequisites
 
-- **Node.js ≥ 18** (`node --version`)
+- **Node.js ≥ 20.19** (`node --version`)
 - A **Pingen account** with an **OAuth client** (`client_credentials` grant) — see below
 - macOS (the credential lookup uses the `security` keychain tool; on other
   platforms use the environment-variable alternative instead)
@@ -90,8 +90,13 @@ The exact service names read by `index.js` are:
 | Client-Secret | `pingen-mcp-client-secret` | `PINGEN_CLIENT_SECRET` |
 | Organisation UUID (optional) | `pingen-mcp-org-uuid` | `PINGEN_ORG_UUID` |
 
-(`PINGEN_API_BASE` overrides the API base URL, default `https://api.pingen.com`.
-Environment variables take precedence over the keychain.)
+(`PINGEN_API_BASE` overrides the API base URL, default `https://api.pingen.com`.)
+
+An environment variable that is **set** always wins — even when it is empty. A
+blank `PINGEN_CLIENT_SECRET` means *no secret*, not *go and look in the
+keychain*; a blank `PINGEN_API_BASE` means *no endpoint*, not *use production*.
+Only an entirely absent variable falls through to the keychain, so blanking one
+is a reliable way to make sure a run cannot reach your real account.
 
 Verify a value is stored (prints the value to your terminal — run only when
 you're OK seeing it):
@@ -175,7 +180,8 @@ still needs something (e.g. the address couldn't be read), the draft is
 ```jsonc
 // 1) create a DRAFT (nothing mailed yet)
 pingen_send_letter { "file_path": "/Users/me/Einsprache_2024.pdf", "delivery_product": "registered", "address_position": "left" }
-// → { created: { id: "<letter_id>", status: "..." }, note: "DRAFT created; nothing sent" }
+// → { created: { id: "<letter_id>", status: "draft", … },
+//     note: "DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter." }
 
 // 2) review in the Pingen dashboard, then physically mail it
 pingen_submit_letter { "letter_id": "<letter_id>", "delivery_product": "registered", "print_mode": "duplex", "print_spectrum": "grayscale" }
@@ -277,10 +283,11 @@ there is no credential, by design.
 
 ## Checks
 
-    npm test
+    npm run gate
 
-Runs exactly what CI runs, offline and without credentials: a syntax check, the
-protocol smoke test and the hygiene scan.
+Runs exactly what CI runs, offline and without credentials: a syntax check,
+ESLint, the protocol smoke test, the hygiene scan, and the test suite under
+coverage. `npm test` runs just the suite, `npm run lint` just the linter.
 
 The smoke test completes the MCP handshake over stdio and asserts the things that
 have actually broken here — a server version drifting from package.json, a tool
@@ -288,6 +295,18 @@ in the dispatcher but missing from the tool list (or advertised and unhandled), 
 required property absent from a schema, and descriptions too thin to choose a
 tool from. The hygiene scan refuses secrets, tracked session files and personal
 identifiers.
+
+The suite in `test/` drives the server over stdio exactly as a real MCP client
+does, against a local stand-in for `api.pingen.com` (`test/mock-pingen.mjs`) that
+listens on an ephemeral port. Credentials are fake, `PINGEN_API_BASE` points at
+the mock, and a `security` stub that finds nothing goes first on `PATH`: **no
+test can reach the real API, the real login keychain, or the post**. Alongside
+the happy paths it pins the properties that matter — that `pingen_send_letter`
+creates a draft and submits nothing, that a non-boolean `auto_send` still yields
+a draft, that submitting is a `PATCH`, and that no token or client secret can
+appear in a tool result or on stderr even when the upstream error body quotes it
+back. The gate fails below 90% line, 90% function and 80% branch coverage of
+`index.js`.
 
 ## License
 
