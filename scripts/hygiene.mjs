@@ -51,12 +51,18 @@ let bad = 0;
 for (const f of files) {
   let body;
   try { body = readFileSync(f, 'utf8'); } catch { continue; }
+  // A source file writes a multi-line postal address as one string with \n in
+  // it — two literal characters, not a break. The word-boundary anchors then
+  // see `n` running into the capital and match nothing, so an address inside a
+  // string literal walked past the whole scan. Treat the escapes as the breaks
+  // they stand for.
+  const scan = body.replace(/\\[nrt]/g, ' ');
   for (const [re, what] of [...SECRETS, ...PERSONAL]) {
-    const m = re.exec(body);
+    const m = re.exec(scan);
     // Location and category only. Printing the match put the secret into the
     // CI log of the job whose entire purpose is to keep it out: an AWS key id
     // is 20 characters and fitted inside the excerpt whole.
-    if (m) { console.log(`FAIL  ${f}:${body.slice(0, m.index).split('\n').length}: ${what} (${m[0].length} chars)`); bad++; }
+    if (m) { console.log(`FAIL  ${f}:${scan.slice(0, m.index).split('\n').length}: ${what} (${m[0].length} chars)`); bad++; }
   }
   for (const m of body.matchAll(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g)) {
     // `git@github.com:owner/repo` is an SSH URL, not somebody's address; the
@@ -69,7 +75,7 @@ for (const f of files) {
   // Compared NFC-folded: the names that leaked last time arrived from the
   // service in NFD, so a byte-exact search walked straight past them.
   for (const term of denylist || []) {
-    if (nfc(body).includes(term)) { console.log(`FAIL  ${f}: denylisted term (${term.length} chars)`); bad++; }
+    if (nfc(scan).includes(term)) { console.log(`FAIL  ${f}: denylisted term (${term.length} chars)`); bad++; }
   }
 }
 

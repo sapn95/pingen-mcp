@@ -19,7 +19,9 @@ const letter = (id, over = {}) => ({
   attributes: {
     status: 'sent',
     delivery_product: 'fast',
-    address: 'Muster AG\nBahnhofstrasse 1\n3000 Bern',
+    // Deliberately not address-shaped: the hygiene scan looks for exactly that
+    // pattern, and a fixture must not be the thing the gate is there to catch.
+    address: 'Example AG\nExample Line 1\nExample City',
     tracking_number: '98.12.345678.90',
     file_pages: 2,
     submitted_at: '2026-07-01T09:15:00+00:00',
