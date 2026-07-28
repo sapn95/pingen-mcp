@@ -138,6 +138,17 @@ async function requestToken() {
   return token;
 }
 
+// Ids go into a URL path, and a path is not a string: "x/../y" resolves away and
+// "../../organisations/<other>/…" reaches a different account entirely. A
+// confirmed delete or submit must act on the letter the caller named, so an id
+// that is not one is refused rather than encoded and hoped for.
+const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+function letterId(v) {
+  const id = String(v ?? '');
+  if (!ID.test(id)) throw new Error(`Ungültige letter_id: ${JSON.stringify(id).slice(0, 60)}`);
+  return id;
+}
+
 async function api(method, path, { json, raw, retry = true } = {}) {
   const headers = { Authorization: `Bearer ${await accessToken()}`, Accept: 'application/vnd.api+json' };
   let bodyInit;
@@ -204,7 +215,7 @@ async function uploadFile(filePath) {
 
 function letterRow(d) {
   const a = d?.attributes || {};
-  return { id: d?.id, status: a.status, delivery_product: a.delivery_product, recipient: a.address, tracking: a.tracking_number, pages: a.file_pages, submitted: a.submitted_at, price: a.price_currency ? `${a.price_value} ${a.price_currency}` : undefined };
+  return { id: d?.id, status: a.status, delivery_product: a.delivery_product, recipient: a.address, tracking: a.tracking_number, pages: a.file_pages, submitted: a.submitted_at, price: (a.price_value != null && a.price_currency) ? `${a.price_value} ${a.price_currency}` : undefined };
 }
 
 const TOOLS = [
@@ -235,7 +246,14 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       const d = await api('GET', '/organisations');
       return text({ organisations: (d.data || []).map(o => ({ id: o.id, name: o.attributes?.name, plan: o.attributes?.plan, status: o.attributes?.status })), active: await orgId() });
     }
+    // Before anything authenticates: an unknown name is a client bug, and
+    // resolving an organisation for it both lies with isError:false and warms
+    // caches on behalf of a call that was never valid.
+    if (!TOOLS.some(t => t.name === name)) throw new Error(`unknown tool ${name}`);
     const oid = await orgId();
+    // Every tool below addresses a letter by id, and every one of them puts it
+    // into a path. Validate once, here.
+    const lid = args.letter_id === undefined ? undefined : letterId(args.letter_id);
     if (name === 'pingen_list_letters') {
       // The schema says number, but nothing enforces a schema on the way in: a
       // string went into the query verbatim, so "20&filter[status]=sent" added
@@ -245,7 +263,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       return text({ letters: (d.data || []).map(letterRow) });
     }
     if (name === 'pingen_get_letter') {
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${args.letter_id}`);
+      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}`);
       return text(letterRow(d.data));
     }
     if (name === 'pingen_send_letter') {
@@ -269,12 +287,12 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         return text({ refused: 'confirm:true is required', note: 'this prints and mails the letter at your cost, and cannot be undone — pingen_get_letter first if you are not sure which draft this is' });
       }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
-      const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${args.letter_id}/send`, { json: { data: { id: args.letter_id, type: 'letters', attributes } } });
+      const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
       return text({ submitted: letterRow(d.data) });
     }
     if (name === 'pingen_cancel_letter') {
-      await api('PATCH', `/organisations/${oid}/deliveries/letters/${args.letter_id}/cancel`, { json: { data: { id: args.letter_id, type: 'letters' } } });
-      return text({ cancelled: args.letter_id });
+      await api('PATCH', `/organisations/${oid}/deliveries/letters/${lid}/cancel`, { json: { data: { id: lid, type: 'letters' } } });
+      return text({ cancelled: lid });
     }
     if (name === 'pingen_delete_letter') {
       // Irreversible, and an agent tidying up is exactly when it gets called by
@@ -283,15 +301,15 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       if (args.confirm !== true) {
         return text({ refused: 'confirm:true is required', note: 'the draft is gone for good; to stop a letter that is already on its way use pingen_cancel_letter' });
       }
-      await api('DELETE', `/organisations/${oid}/deliveries/letters/${args.letter_id}`);
-      return text({ deleted: args.letter_id });
+      await api('DELETE', `/organisations/${oid}/deliveries/letters/${lid}`);
+      return text({ deleted: lid });
     }
     if (name === 'pingen_letter_events') {
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${args.letter_id}/events?sort=-emitted_at`);
+      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/events?sort=-emitted_at`);
       return text({ events: (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data })) });
     }
     if (name === 'pingen_download_letter') {
-      const r = await api('GET', `/organisations/${oid}/deliveries/letters/${args.letter_id}/file`, { raw: true });
+      const r = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/file`, { raw: true });
       const ct = r.headers.get('content-type') || '';
       let bytes;
       if (ct.includes('pdf') || ct.includes('octet-stream')) {
@@ -305,12 +323,20 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         // one in the server, and a stalled bucket hung the client for ever.
         const f = await http('Datei-Download', url, { timeout: TRANSFER_TIMEOUT_MS });
         if (!f.ok) throw new Error(`Datei-Download ${f.status}`);
+        // The direct path above checks the content type; this one used to take
+        // whatever came back. A bucket that answers an expired link with an XML
+        // error, or a portal that answers with HTML, would have been written to
+        // disk as the letter and reported as saved.
         bytes = Buffer.from(await f.arrayBuffer());
+      }
+      // Whichever path produced them, the bytes have to be a PDF. Saying
+      // "saved" about an error page is a wrong answer, not a failure.
+      if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
+        throw new Error(`Antwort ist kein PDF (${bytes.length} Bytes, Signatur ${JSON.stringify(bytes.subarray(0, 5).toString('latin1'))}) — Brief evtl. noch nicht verarbeitet.`);
       }
       writeFileSync(args.output_path, bytes);
       return text({ saved: args.output_path, bytes: bytes.length });
     }
-    return text({ error: `unknown tool ${name}` });
   } catch (e) {
     return { content: [{ type: 'text', text: redact('ERROR: ' + (e.message || String(e))) }], isError: true };
   }

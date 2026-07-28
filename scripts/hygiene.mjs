@@ -53,13 +53,18 @@ for (const f of files) {
   try { body = readFileSync(f, 'utf8'); } catch { continue; }
   for (const [re, what] of [...SECRETS, ...PERSONAL]) {
     const m = re.exec(body);
-    if (m) { console.log(`FAIL  ${f}: ${what} — ${m[0].slice(0, 24)}…`); bad++; }
+    // Location and category only. Printing the match put the secret into the
+    // CI log of the job whose entire purpose is to keep it out: an AWS key id
+    // is 20 characters and fitted inside the excerpt whole.
+    if (m) { console.log(`FAIL  ${f}:${body.slice(0, m.index).split('\n').length}: ${what} (${m[0].length} chars)`); bad++; }
   }
   for (const m of body.matchAll(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g)) {
     // `git@github.com:owner/repo` is an SSH URL, not somebody's address; the
     // trailing colon is what tells the two apart.
     if (m[0].startsWith('git@') && body[m.index + m[0].length] === ':') continue;
-    if (!MAIL_OK.test(m[0])) { console.log(`FAIL  ${f}: email address — ${m[0]}`); bad++; }
+    // The address is the finding, and it is the thing that must not be echoed;
+    // the domain is enough to find it.
+    if (!MAIL_OK.test(m[0])) { console.log(`FAIL  ${f}: email address at @${m[0].split('@')[1]}`); bad++; }
   }
   // Compared NFC-folded: the names that leaked last time arrived from the
   // service in NFD, so a byte-exact search walked straight past them.
@@ -81,7 +86,7 @@ try {
   const idents = new Set(execFileSync('git', ['log', '--all', '--format=%ae%n%ce'], { encoding: 'utf8' })
     .split('\n').filter(Boolean));
   for (const mail of idents) {
-    if (!MAIL_OK.test(mail)) { console.log(`FAIL  commit identity is not anonymous — ${mail}`); bad++; }
+    if (!MAIL_OK.test(mail)) { console.log(`FAIL  commit identity is not anonymous (@${mail.split('@')[1]})`); bad++; }
   }
 } catch { /* no history to inspect, e.g. an export rather than a clone */ }
 
