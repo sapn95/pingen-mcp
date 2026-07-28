@@ -158,7 +158,7 @@ describe('sending', () => {
   });
 
   test('submits a draft with PATCH and the documented print defaults', async () => {
-    const { data } = await srv.call('pingen_submit_letter', { letter_id: draftId, delivery_product: 'fast' });
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: draftId, delivery_product: 'fast', confirm: true });
     assert.equal(data.submitted.id, draftId);
     assert.ok(mock.state.calls.includes(`PATCH /organisations/${ORG}/deliveries/letters/${draftId}/send`));
     const sub = mock.state.submitted.at(-1);
@@ -166,7 +166,7 @@ describe('sending', () => {
   });
 
   test('print mode and spectrum can be overridden', async () => {
-    await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'cheap', print_mode: 'duplex', print_spectrum: 'grayscale' });
+    await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'cheap', print_mode: 'duplex', print_spectrum: 'grayscale', confirm: true });
     const sub = mock.state.submitted.at(-1);
     assert.equal(sub.attributes.print_mode, 'duplex');
     assert.equal(sub.attributes.print_spectrum, 'grayscale');
@@ -180,7 +180,7 @@ describe('sending', () => {
 
   test('deletes a draft outright', async () => {
     const { data: created } = await srv.call('pingen_send_letter', { file_path: pdf });
-    const { data } = await srv.call('pingen_delete_letter', { letter_id: created.created.id });
+    const { data } = await srv.call('pingen_delete_letter', { letter_id: created.created.id, confirm: true });
     assert.equal(data.deleted, created.created.id);
     assert.ok(mock.state.deleted.includes(created.created.id));
     const { isError } = await srv.call('pingen_get_letter', { letter_id: created.created.id });

@@ -150,7 +150,10 @@ accident:
    (`auto_send = false`). **Nothing is mailed.** You can review it in the Pingen
    dashboard.
 2. **`pingen_submit_letter`** takes an existing draft and **physically mails
-   it**. This is the step that costs money and puts paper in the post.
+   it**. This is the step that costs money and puts paper in the post, so it
+   needs `confirm: true`. `pingen_delete_letter` needs the same, because a
+   deleted draft does not come back. `pingen_cancel_letter` does not: stopping
+   a letter is the safe direction.
 
 The only shortcut is passing `auto_send: true` to `pingen_send_letter`, which
 mails immediately without a review step — use deliberately.
@@ -166,12 +169,12 @@ still needs something (e.g. the address couldn't be read), the draft is
 | Tool | Parameters | What it does / returns |
 | --- | --- | --- |
 | `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. |
-| `pingen_list_letters` | `limit` (number, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. |
+| `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. |
 | `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately. |
-| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft.** Requires the letter to be `valid`. Returns the submitted letter row. |
+| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. Returns the submitted letter row. |
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |
 | `pingen_cancel_letter` | `letter_id` (required) | Cancels an already-submitted/sent letter where Pingen still allows it. Returns `{ cancelled: <id> }`. |
-| `pingen_delete_letter` | `letter_id` (required) | Deletes a draft / not-yet-sent letter (removes it from the dashboard). Returns `{ deleted: <id> }`. |
+| `pingen_delete_letter` | `letter_id` (required); **`confirm: true` (required)** | Deletes a draft / not-yet-sent letter for good. To stop a letter already on its way use `pingen_cancel_letter`. Returns `{ deleted: <id> }`. |
 | `pingen_letter_events` | `letter_id` (required) | Tracking/status history (created → submitted → sent → delivered → undeliverable …): `type`, `at`, `detail`. |
 | `pingen_download_letter` | `letter_id` (required); `output_path` (required) | Downloads the final letter PDF to `output_path` (available once processed/sent). Returns `{ saved, bytes }`. |
 
@@ -184,7 +187,7 @@ pingen_send_letter { "file_path": "/Users/me/Einsprache_2024.pdf", "delivery_pro
 //     note: "DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter." }
 
 // 2) review in the Pingen dashboard, then physically mail it
-pingen_submit_letter { "letter_id": "<letter_id>", "delivery_product": "registered", "print_mode": "duplex", "print_spectrum": "grayscale" }
+pingen_submit_letter { "letter_id": "<letter_id>", "delivery_product": "registered", "print_mode": "duplex", "print_spectrum": "grayscale", "confirm": true }
 ```
 
 ---
