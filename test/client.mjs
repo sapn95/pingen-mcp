@@ -14,8 +14,14 @@ const ENTRY = join(dirname(fileURLToPath(import.meta.url)), '..', 'index.js');
 // with a blanked credential would otherwise go shopping in the developer's
 // login keychain and authenticate as the real Pingen account. A test that wants
 // a keychain answer passes its own PATH.
+//
+// It complains on stderr on the way out, because the real one does and because
+// execFileSync passes a child's stderr on to ours: a silent stub let a server
+// that echoed the keychain's grumbling look clean to every test in the suite.
 const NULL_KEYCHAIN = mkdtempSync(join(tmpdir(), 'pingen-null-keychain-'));
-writeFileSync(join(NULL_KEYCHAIN, 'security'), '#!/bin/sh\nexit 44\n', { mode: 0o755 });
+writeFileSync(join(NULL_KEYCHAIN, 'security'),
+  '#!/bin/sh\necho "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2\nexit 44\n',
+  { mode: 0o755 });
 
 // Credentials every server under test starts with. They are fake on purpose:
 // combined with PINGEN_API_BASE pointing at the local mock, no test can reach

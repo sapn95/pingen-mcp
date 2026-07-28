@@ -24,8 +24,8 @@
     "lint": "eslint .",
     "smoke": "node scripts/smoke.mjs",
     "hygiene": "node scripts/hygiene.mjs",
-    "test": "node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs",
-    "coverage": "c8 --reporter=text-summary --include=index.js --check-coverage --lines 90 --functions 90 --branches 80 node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs",
+    "test": "node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs test/hygiene.test.mjs",
+    "coverage": "c8 --reporter=text-summary --include=index.js --check-coverage --lines 90 --functions 90 --branches 80 node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs test/hygiene.test.mjs",
     "gate": "npm run lint && node scripts/smoke.mjs && node scripts/hygiene.mjs && npm run coverage",
     "prepublishOnly": "npm run gate"
   },

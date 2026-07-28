@@ -77,6 +77,11 @@ try {
   // tautology — green even while the README listed tools that had been
   // deleted. Ask the server instead: "unknown tool" is the one answer that
   // proves no branch exists, and every other outcome proves one does.
+  //
+  // That only holds because the server now decides which branch handles a call
+  // before it authenticates. While the organisation lookup came first, every
+  // tool here answered "Keine Pingen-Credentials" — deleting a whole branch
+  // from the dispatcher left this check green, which is how it was found.
   for (const n of names) {
     const r = await send('tools/call', { name: n, arguments: {} }).catch(e => ({ error: e }));
     const said = JSON.stringify(r?.result ?? r?.error ?? r);

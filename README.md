@@ -318,6 +318,10 @@ appear in a tool result or on stderr even when the upstream error body quotes it
 back. The gate fails below 90% line, 90% function and 80% branch coverage of
 `index.js`.
 
+`test/hygiene.test.mjs` points the hygiene scan at throwaway git repositories
+instead, because run over this repository — where everything is clean — a scan
+that silently skipped half the files would look exactly like one that worked.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
