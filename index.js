@@ -18,7 +18,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -351,7 +351,10 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
         throw new Error(`Antwort ist kein PDF (${bytes.length} Bytes, Signatur ${JSON.stringify(bytes.subarray(0, 5).toString('latin1'))}) — Brief evtl. noch nicht verarbeitet.`);
       }
-      writeFileSync(args.output_path, bytes);
+      // A letter is correspondence. Written with the process umask it can land
+      // group- and world-readable, and `w` follows a symlink at that path.
+      writeFileSync(args.output_path, bytes, { mode: 0o600 });
+      chmodSync(args.output_path, 0o600);
       return text({ saved: args.output_path, bytes: bytes.length });
     }
   } catch (e) {
