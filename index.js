@@ -27,9 +27,16 @@ import { execFileSync } from 'node:child_process';
 // advertises a stale version to every client.
 const PKG = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
+// stdio is spelled out because execFileSync hands the child's stderr straight to
+// ours by default, and `security` writes a line to stderr for every entry it
+// cannot find. A machine that keeps only the two required credentials in the
+// keychain therefore printed "SecKeychainSearchCopyNext: The specified item
+// could not be found" on a perfectly healthy start, which a client shows as a
+// server error and which the catch below was written to swallow. The exit code
+// is all we ever wanted from it.
 function keychain(service) {
   try {
-    return execFileSync('security', ['find-generic-password', '-a', 'pingen', '-s', service, '-w'], { encoding: 'utf8' }).trim();
+    return execFileSync('security', ['find-generic-password', '-a', 'pingen', '-s', service, '-w'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch { return ''; }
 }
 
@@ -299,7 +306,14 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     // resolving an organisation for it both lies with isError:false and warms
     // caches on behalf of a call that was never valid.
     if (!TOOLS.some(t => t.name === name)) throw new Error(`unknown tool ${name}`);
-    const oid = await orgId();
+    // Resolved where it is used, not here. The same rule has to hold for a name
+    // that is advertised but has no branch below, and with the lookup up front
+    // such a call authenticated, resolved an organisation, and only then fell
+    // out of the chain. It is also what made the smoke test's dispatcher probe
+    // meaningless: with credentials blanked every tool answered "no
+    // credentials" before dispatch, so a branch deleted from the chain was
+    // indistinguishable from a working one and the check passed.
+    const oid = () => orgId();
     // Every tool below addresses a letter by id, and every one of them puts it
     // into a path. Validate once, here.
     const lid = args.letter_id === undefined ? undefined : letterId(args.letter_id);
@@ -308,11 +322,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       // string went into the query verbatim, so "20&filter[status]=sent" added
       // a parameter of the caller's choosing to a request built here.
       const limit = Math.min(100, Math.max(1, Math.trunc(Number(args.limit)) || 20));
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters?page[limit]=${limit}&sort=-created_at`);
+      const d = await api('GET', `/organisations/${await oid()}/deliveries/letters?page[limit]=${limit}&sort=-created_at`);
       return text({ letters: (d.data || []).map(letterRow) });
     }
     if (name === 'pingen_get_letter') {
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}`);
+      const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}`);
       return text(letterRow(d.data));
     }
     if (name === 'pingen_send_letter') {
@@ -324,7 +338,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         auto_send: args.auto_send === true,
       };
       if (args.delivery_product) attributes.delivery_product = args.delivery_product;
-      const d = await api('POST', `/organisations/${oid}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
+      const d = await api('POST', `/organisations/${await oid()}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
       // The note used to repeat the flag we sent. Pingen can answer
       // `action_required` — a letter it will not send until something is fixed
       // — and the tool said "wird versandt" about it anyway.
@@ -352,11 +366,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         return text({ refused: 'delivery_product ist erforderlich', note: 'z. B. cheap (B-Post), fast (A-Post), registered (Einschreiben)' });
       }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
-      const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
+      const d = await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
       return text({ submitted: letterRow(d.data) });
     }
     if (name === 'pingen_cancel_letter') {
-      await api('PATCH', `/organisations/${oid}/deliveries/letters/${lid}/cancel`, { json: { data: { id: lid, type: 'letters' } } });
+      await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/cancel`, { json: { data: { id: lid, type: 'letters' } } });
       return text({ cancelled: lid });
     }
     if (name === 'pingen_delete_letter') {
@@ -366,11 +380,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       if (args.confirm !== true) {
         return text({ refused: 'confirm:true is required', note: 'the draft is gone for good; to stop a letter that is already on its way use pingen_cancel_letter' });
       }
-      await api('DELETE', `/organisations/${oid}/deliveries/letters/${lid}`);
+      await api('DELETE', `/organisations/${await oid()}/deliveries/letters/${lid}`);
       return text({ deleted: lid });
     }
     if (name === 'pingen_letter_events') {
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/events?sort=-emitted_at`);
+      const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/events?sort=-emitted_at`);
       // One page, and it used to be handed over as the whole history. A letter
       // with a long tracking trail then looked like it had stopped moving.
       const events = (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data }));
@@ -378,7 +392,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       return text({ events, ...(more ? { truncated: true, hint: 'Pingen meldet weitere Ereignisse — dies ist die erste Seite' } : {}) });
     }
     if (name === 'pingen_download_letter') {
-      const r = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/file`, { raw: true });
+      const r = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/file`, { raw: true });
       // Media types are case-insensitive. "Application/PDF" is as valid as the
       // lowercase form, and it used to be parsed as JSON and rejected.
       const ct = (r.headers.get('content-type') || '').toLowerCase();
@@ -410,6 +424,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       writePrivate(args.output_path, bytes);
       return text({ saved: args.output_path, bytes: bytes.length });
     }
+    // Advertised, and it reached the bottom of the chain, so nothing handles it.
+    // Falling off the end returned undefined, which the client reads as a
+    // successful call with no content: asking to cancel a letter was answered,
+    // cheerfully and with isError:false, by nothing at all.
+    throw new Error(`unknown tool ${name}`);
   } catch (e) {
     return { content: [{ type: 'text', text: redact('ERROR: ' + (e.message || String(e))) }], isError: true };
   }

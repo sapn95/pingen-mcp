@@ -14,17 +14,25 @@ let mock, srv, out, pdf;
 // A stand-in for macOS `security`, so the keychain path can be exercised
 // without ever touching the real login keychain — and so a test can prove the
 // keychain was *not* consulted. A fresh one per test: the log is the assertion.
+//
+// The miss case complains on stderr exactly as the real tool does. It used to
+// fail silently, which made the "not noise on stderr" assertion below unable to
+// fail: the real `security` prints SecKeychainSearchCopyNext for every entry it
+// cannot find, execFileSync hands that straight to our own stderr, and a server
+// with two of three entries in the keychain therefore greeted its client with
+// an error on every start while the suite stayed green.
+const MISS = 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.';
 function keychainShim({ empty = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'pingen-shim-'));
   const log = join(dir, 'security.log');
   // `security find-generic-password -a pingen -s <service> -w` → $5 is the service.
   writeFileSync(join(dir, 'security'), `#!/bin/sh
 echo "$5" >> "${log}"
-${empty ? 'exit 44' : `case "$5" in
+${empty ? `echo '${MISS}' >&2; exit 44` : `case "$5" in
   pingen-mcp-client-id) echo '${FAKE.PINGEN_CLIENT_ID}' ;;
   pingen-mcp-client-secret) echo '${FAKE.PINGEN_CLIENT_SECRET}' ;;
   pingen-mcp-org-uuid) echo '${FAKE.PINGEN_ORG_UUID}' ;;
-  *) exit 44 ;;
+  *) echo '${MISS}' >&2; exit 44 ;;
 esac`}
 `, { mode: 0o755 });
   // The shim goes first on PATH so the real /usr/bin/security is never reached.
@@ -81,6 +89,27 @@ describe('nothing is mailed by accident', () => {
     const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', confirm: true });
     assert.match(data.refused, /delivery_product/);
     assert.equal(mock.state.submitted.length, before);
+  });
+
+  test('a refusal costs nothing: no token, no organisation lookup, no request', async () => {
+    // The dispatcher resolved an organisation for every call before it reached
+    // the branch that would refuse it, so declining to mail a letter still
+    // minted a token and asked the API who we are. That ordering is also what
+    // decides whether the smoke test can tell a deleted dispatcher branch from
+    // a working one, so it is pinned here rather than left to the shape of the
+    // code. PINGEN_ORG_UUID is blanked deliberately: with one configured there
+    // is no lookup to make and the ordering cannot be observed.
+    const fresh = await start();
+    const s = await startServer({ PINGEN_API_BASE: fresh.base, PINGEN_ORG_UUID: '' });
+    const { data } = await s.call('pingen_submit_letter', { letter_id: 'ltr-1', delivery_product: 'fast' });
+    // Shut down before asserting: a failed assertion here would otherwise leave
+    // the server running, and the runner then hangs on the live child instead
+    // of printing which assertion went wrong.
+    const calls = [...fresh.state.calls];
+    await s.stop();
+    await fresh.close();
+    assert.match(data.refused, /confirm:true/);
+    assert.equal(calls.length, 0, `it called out anyway: ${calls}`);
   });
 
   test('deleting without confirm removes nothing', async () => {
