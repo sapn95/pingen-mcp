@@ -13,7 +13,9 @@ const SECRETS = [
   [/AKIA[0-9A-Z]{16}/, 'AWS access key'],
   [/ghp_[A-Za-z0-9]{36}/, 'GitHub PAT'],
   [/xox[baprs]-[A-Za-z0-9-]{10,}/, 'Slack token'],
-  [/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/, 'private key'],
+  [/-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/, 'private key'],
+  [/github_pat_[A-Za-z0-9_]{20,}/, 'fine-grained GitHub token'],
+  [/\bnpm_[A-Za-z0-9]{36}\b/, 'npm token'],
   [/"?access_token"?\s*[:=]\s*["'][A-Za-z0-9._-]{20,}/, 'hardcoded access token'],
 ];
 

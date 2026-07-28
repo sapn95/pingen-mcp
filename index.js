@@ -18,7 +18,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { readFileSync, statSync, openSync, writeSync, fchmodSync, closeSync, constants } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -193,7 +193,34 @@ async function discoverOrg() {
 // Upload a local PDF: GET /file-upload → PUT bytes → returns {url, signature}.
 // The file is read and checked first, so a wrong path is refused before its
 // bytes leave the machine rather than after Pingen has seen them.
+// Write bytes to a path the caller named, and only to a path.
+//
+// writeFileSync takes a number as a FILE DESCRIPTOR, so output_path: 2 wrote a
+// letter to stderr and output_path: 1 wrote it into the MCP stream itself. It
+// also follows a symlink at the destination, and mode: only applies to a file
+// it creates — an existing world-readable file kept its permissions until the
+// chmod afterwards. O_NOFOLLOW and an explicit 0600 close all three.
+function writePrivate(path, bytes) {
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new Error(`output_path muss ein Pfad sein, nicht ${typeof path}`);
+  }
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  try {
+    writeSync(fd, bytes);
+    fchmodSync(fd, 0o600);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 async function uploadFile(filePath) {
+  // readFileSync takes a number as a file descriptor too: file_path: 0 reads
+  // the MCP input stream, and a character device never ends.
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    throw new Error(`file_path muss ein Pfad sein, nicht ${typeof filePath}`);
+  }
+  const st = statSync(filePath);
+  if (!st.isFile()) throw new Error(`file_path ist keine normale Datei: ${basename(String(filePath))}`);
   const bytes = readFileSync(filePath);
   // A signature check, not a validity check: it catches the wrong path — a key,
   // a dump, a text file — before its bytes leave the machine. Whether the PDF
@@ -353,8 +380,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       }
       // A letter is correspondence. Written with the process umask it can land
       // group- and world-readable, and `w` follows a symlink at that path.
-      writeFileSync(args.output_path, bytes, { mode: 0o600 });
-      chmodSync(args.output_path, 0o600);
+      writePrivate(args.output_path, bytes);
       return text({ saved: args.output_path, bytes: bytes.length });
     }
   } catch (e) {
