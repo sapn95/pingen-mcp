@@ -19,7 +19,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { readFileSync, statSync, openSync, writeSync, fchmodSync, closeSync, constants } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 // Name and version come from package.json, never from a second copy here:
@@ -204,6 +204,10 @@ function writePrivate(path, bytes) {
   if (typeof path !== 'string' || !path.trim()) {
     throw new Error(`output_path muss ein Pfad sein, nicht ${typeof path}`);
   }
+  // Relative means "relative to wherever the server was started", which the
+  // caller does not know and the schema says is absolute. Guessing that wrong
+  // writes a letter somewhere nobody will look for it.
+  if (!isAbsolute(path)) throw new Error(`output_path muss absolut sein: ${path}`);
   const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
   try {
     writeSync(fd, bytes);
@@ -219,6 +223,8 @@ async function uploadFile(filePath) {
   if (typeof filePath !== 'string' || !filePath.trim()) {
     throw new Error(`file_path muss ein Pfad sein, nicht ${typeof filePath}`);
   }
+  // Same reasoning as the output path, and here it decides which PDF is mailed.
+  if (!isAbsolute(filePath)) throw new Error(`file_path muss absolut sein: ${filePath}`);
   const st = statSync(filePath);
   if (!st.isFile()) throw new Error(`file_path ist keine normale Datei: ${basename(String(filePath))}`);
   const bytes = readFileSync(filePath);
