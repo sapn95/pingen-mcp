@@ -344,6 +344,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       if (args.confirm !== true) {
         return text({ refused: 'confirm:true is required', note: 'this prints and mails the letter at your cost, and cannot be undone — pingen_get_letter first if you are not sure which draft this is' });
       }
+      // required: in the schema is a hint to the client, not a check. Sending
+      // this without a product either takes whatever Pingen defaults to or
+      // reuses one already on the draft — either way the letter is franked in a
+      // way nobody chose, and it is already in the post by the time you look.
+      if (typeof args.delivery_product !== 'string' || !args.delivery_product.trim()) {
+        return text({ refused: 'delivery_product ist erforderlich', note: 'z. B. cheap (B-Post), fast (A-Post), registered (Einschreiben)' });
+      }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
       const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
       return text({ submitted: letterRow(d.data) });
@@ -368,7 +375,9 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     }
     if (name === 'pingen_download_letter') {
       const r = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/file`, { raw: true });
-      const ct = r.headers.get('content-type') || '';
+      // Media types are case-insensitive. "Application/PDF" is as valid as the
+      // lowercase form, and it used to be parsed as JSON and rejected.
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
       let bytes;
       if (ct.includes('pdf') || ct.includes('octet-stream')) {
         bytes = Buffer.from(await r.arrayBuffer());
