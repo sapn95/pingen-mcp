@@ -81,6 +81,16 @@ describe('nothing is mailed by accident', () => {
     assert.ok(!mock.state.calls.some(c => c.startsWith('DELETE ')), 'nothing was deleted');
   });
 
+  test('auto_send is reported from the status Pingen returned, not the flag we sent', async () => {
+    // Pingen can accept the letter and still not send it. Repeating our own
+    // request back as "wird versandt" is a wrong answer about the post.
+    mock.state.nextStatus = 'action_required';
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+    mock.state.nextStatus = null;
+    assert.match(data.note, /NICHT versandt/, `claimed a send: ${data.note}`);
+    assert.match(data.note, /action_required/);
+  });
+
   test('a list limit cannot smuggle extra query parameters into the request', async () => {
     // The schema says number; nothing enforces it. A string went into the query
     // verbatim, so the caller could append parameters of their own choosing.
