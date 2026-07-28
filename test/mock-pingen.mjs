@@ -35,6 +35,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     urls: [],             // the same requests with their query string
     authHeaders: [],      // every Authorization header the API saw
     tokenGrants: 0,
+    nextStatus: null,      // force the next created letter's status
     uploads: [],          // { slot, bytes }
     created: [],          // attributes of every POSTed letter
     submitted: [],        // { id, attributes } of every PATCH .../send
@@ -129,7 +130,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         state.created.push(attributes);
         const created = letter(`ltr-new-${state.created.length}`, {
           ...attributes,
-          status: attributes.auto_send ? 'processing' : 'draft',
+          // Pingen can accept a letter and still refuse to send it. A test sets
+          // state.nextStatus to make it answer that way once.
+          status: state.nextStatus || (attributes.auto_send ? 'processing' : 'draft'),
           tracking_number: null,
           submitted_at: attributes.auto_send ? '2026-07-27T10:00:00+00:00' : null,
         });

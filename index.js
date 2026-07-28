@@ -244,7 +244,15 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     if (name === 'pingen_status') {
       const d = await api('GET', '/organisations');
-      return text({ organisations: (d.data || []).map(o => ({ id: o.id, name: o.attributes?.name, plan: o.attributes?.plan, status: o.attributes?.status })), active: await orgId() });
+      const orgs = (d.data || []).map(o => ({ id: o.id, name: o.attributes?.name, plan: o.attributes?.plan, status: o.attributes?.status }));
+      const active = await orgId();
+      // A configured UUID was reported as active without checking it is one of
+      // ours: a stale or mistyped value produced a confident, false answer, and
+      // every later call then 404s for reasons this tool said were fine.
+      if (!orgs.some(o => o.id === active)) {
+        return text({ organisations: orgs, active: null, error: `PINGEN_ORG_UUID ${active} gehört zu keiner erreichbaren Organisation` });
+      }
+      return text({ organisations: orgs, active });
     }
     // Before anything authenticates: an unknown name is a client bug, and
     // resolving an organisation for it both lies with isError:false and warms
@@ -276,7 +284,16 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       };
       if (args.delivery_product) attributes.delivery_product = args.delivery_product;
       const d = await api('POST', `/organisations/${oid}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
-      return text({ created: letterRow(d.data), note: attributes.auto_send ? 'auto_send=true → wird versandt' : 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.' });
+      // The note used to repeat the flag we sent. Pingen can answer
+      // `action_required` — a letter it will not send until something is fixed
+      // — and the tool said "wird versandt" about it anyway.
+      const status = d.data?.attributes?.status;
+      const note = !attributes.auto_send
+        ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
+        : status === 'draft' || status === 'action_required' || status === 'invalid'
+          ? `auto_send=true, aber Pingen meldet Status "${status}" — NICHT versandt. Details: pingen_get_letter.`
+          : `auto_send=true, Pingen meldet Status "${status ?? 'unbekannt'}" → wird versandt.`;
+      return text({ created: letterRow(d.data), note });
     }
     if (name === 'pingen_submit_letter') {
       // This is the one action in the suite that reaches the physical world and
