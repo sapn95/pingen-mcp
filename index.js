@@ -210,7 +210,15 @@ function writePrivate(path, bytes) {
   if (!isAbsolute(path)) throw new Error(`output_path muss absolut sein: ${path}`);
   const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
   try {
-    writeSync(fd, bytes);
+    // writeSync may write fewer bytes than it was given. Ignoring the return
+    // value meant a truncated PDF was reported as saved, with the full byte
+    // count beside it.
+    let off = 0;
+    while (off < bytes.length) {
+      const n = writeSync(fd, bytes, off, bytes.length - off);
+      if (!n) throw new Error(`Schreiben blieb bei ${off}/${bytes.length} Bytes stehen`);
+      off += n;
+    }
     fchmodSync(fd, 0o600);
   } finally {
     closeSync(fd);
