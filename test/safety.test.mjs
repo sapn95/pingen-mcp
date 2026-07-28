@@ -57,6 +57,47 @@ describe('nothing is mailed by accident', () => {
     assert.match(data.note, /DRAFT/);
   });
 
+  test('submitting without confirm mails nothing and says what is missing', async () => {
+    // The most consequential call in the suite — it prints, franks and posts a
+    // physical letter, and no amount of apologising gets it back.
+    const before = mock.state.submitted.length;
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast' });
+    assert.match(data.refused, /confirm:true/);
+    assert.equal(mock.state.submitted.length, before, 'and nothing left the building');
+  });
+
+  test('a truthy-but-not-boolean confirm is not a confirmation', async () => {
+    // Same reasoning as auto_send above: the schema is not enforced on the wire.
+    const before = mock.state.submitted.length;
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: 'true' });
+    assert.match(data.refused, /confirm:true/);
+    assert.equal(mock.state.submitted.length, before);
+  });
+
+  test('deleting without confirm removes nothing', async () => {
+    const { data } = await srv.call('pingen_delete_letter', { letter_id: 'ltr-3' });
+    assert.match(data.refused, /confirm:true/);
+    assert.match(data.note, /pingen_cancel_letter/, 'it names the safe alternative');
+    assert.ok(!mock.state.calls.some(c => c.startsWith('DELETE ')), 'nothing was deleted');
+  });
+
+  test('a list limit cannot smuggle extra query parameters into the request', async () => {
+    // The schema says number; nothing enforces it. A string went into the query
+    // verbatim, so the caller could append parameters of their own choosing.
+    await srv.call('pingen_list_letters', { limit: '5&filter[status]=sent' });
+    // state.calls holds paths only, so the query has to come from state.urls —
+    // a query-string assertion against the path list can never fail.
+    const listed = mock.state.urls.filter(u => u.includes('/deliveries/letters?'));
+    assert.ok(listed.length, 'the call was made');
+    assert.ok(!listed.some(u => u.includes('filter')), `smuggled a parameter: ${listed.at(-1)}`);
+    // Not a partial parse of "5&…" either: half-reading hostile input is how
+    // this class of bug comes back. Unusable means the documented default.
+    assert.match(listed.at(-1), /page%5Blimit%5D=20|page\[limit\]=20/, 'it fell back to the default');
+
+    await srv.call('pingen_list_letters', { limit: 5 });
+    assert.match(mock.state.urls.at(-1), /page%5Blimit%5D=5|page\[limit\]=5/, 'a real number is still honoured');
+  });
+
   test('reading tools never touch the send endpoint', async () => {
     await srv.call('pingen_status');
     await srv.call('pingen_list_letters');
@@ -66,7 +107,7 @@ describe('nothing is mailed by accident', () => {
   });
 
   test('submitting is a PATCH, and a POST to /send is never attempted', async () => {
-    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast' });
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
     assert.equal(data.submitted.id, 'ltr-2');
     assert.equal(mock.state.submitted.length, 1, 'exactly the one letter we asked for');
     const sendCalls = mock.state.calls.filter(c => c.endsWith('/send'));
@@ -86,7 +127,7 @@ describe('credentials never leave the process', () => {
       ['pingen_send_letter', { file_path: pdf }],
       ['pingen_download_letter', { letter_id: 'ltr-1', output_path: join(out, 'x.pdf') }],
       ['pingen_cancel_letter', { letter_id: 'ltr-1' }],
-      ['pingen_delete_letter', { letter_id: 'ltr-3' }],
+      ['pingen_delete_letter', { letter_id: 'ltr-3', confirm: true }],
     ]) {
       results.push((await srv.call(name, args)).raw);
     }

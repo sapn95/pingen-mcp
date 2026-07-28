@@ -10,7 +10,10 @@
 //
 // Safety: send_letter creates a DRAFT (auto_send=false) unless the caller
 // explicitly passes auto_send:true. Short of that one opt-in, nothing is
-// physically mailed until submit_letter is called.
+// physically mailed until submit_letter is called — and that call, like
+// delete_letter, needs confirm:true. Posting a letter spends money and reaches
+// the physical world; deleting a draft cannot be undone. Cancelling is the one
+// direction that is safe, so pingen_cancel_letter stays ungated.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -213,10 +216,10 @@ const TOOLS = [
       address_position: { type: 'string', enum: ['left', 'right'], description: 'window position of the address on the first page (default left)' },
       auto_send: { type: 'boolean', description: 'default false = create draft only' },
     }, required: ['file_path'] } },
-  { name: 'pingen_submit_letter', description: 'Send an existing DRAFT letter with a delivery product (this physically mails it). Optional print_mode (simplex/duplex) and print_spectrum (color/grayscale).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, delivery_product: { type: 'string' }, print_mode: { type: 'string' }, print_spectrum: { type: 'string' } }, required: ['letter_id', 'delivery_product'] } },
+  { name: 'pingen_submit_letter', description: 'IRREVERSIBLE AND CHARGEABLE: prints and physically mails an existing DRAFT letter. Requires confirm:true. Optional print_mode (simplex/duplex) and print_spectrum (color/grayscale).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, delivery_product: { type: 'string' }, print_mode: { type: 'string' }, print_spectrum: { type: 'string' }, confirm: { type: 'boolean' } }, required: ['letter_id', 'delivery_product', 'confirm'] } },
   { name: 'pingen_get_letter', description: 'Get one letter status/tracking by id.', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_cancel_letter', description: 'Cancel a letter that has already been submitted/sent (where cancellable).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
-  { name: 'pingen_delete_letter', description: 'Delete a draft / not-yet-sent letter (removes it from the dashboard).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
+  { name: 'pingen_delete_letter', description: 'DESTRUCTIVE: delete a draft / not-yet-sent letter for good. Requires confirm:true. To stop a letter already on its way use pingen_cancel_letter instead.', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, confirm: { type: 'boolean' } }, required: ['letter_id', 'confirm'] } },
   { name: 'pingen_letter_events', description: 'Tracking/status history of a letter (created, submitted, sent, delivered, undeliverable …).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' } }, required: ['letter_id'] } },
   { name: 'pingen_download_letter', description: 'Download the letter PDF to output_path (available once the letter is processed/sent).', inputSchema: { type: 'object', properties: { letter_id: { type: 'string' }, output_path: { type: 'string' } }, required: ['letter_id', 'output_path'] } },
 ];
@@ -234,7 +237,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     }
     const oid = await orgId();
     if (name === 'pingen_list_letters') {
-      const d = await api('GET', `/organisations/${oid}/deliveries/letters?page[limit]=${args.limit || 20}&sort=-created_at`);
+      // The schema says number, but nothing enforces a schema on the way in: a
+      // string went into the query verbatim, so "20&filter[status]=sent" added
+      // a parameter of the caller's choosing to a request built here.
+      const limit = Math.min(100, Math.max(1, Math.trunc(Number(args.limit)) || 20));
+      const d = await api('GET', `/organisations/${oid}/deliveries/letters?page[limit]=${limit}&sort=-created_at`);
       return text({ letters: (d.data || []).map(letterRow) });
     }
     if (name === 'pingen_get_letter') {
@@ -254,6 +261,13 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       return text({ created: letterRow(d.data), note: attributes.auto_send ? 'auto_send=true → wird versandt' : 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.' });
     }
     if (name === 'pingen_submit_letter') {
+      // This is the one action in the suite that reaches the physical world and
+      // spends money, and there is no undo once the sheet is printed. The sister
+      // server gates a mere trash-can delete behind confirm:true; sending a
+      // letter had no gate at all.
+      if (args.confirm !== true) {
+        return text({ refused: 'confirm:true is required', note: 'this prints and mails the letter at your cost, and cannot be undone — pingen_get_letter first if you are not sure which draft this is' });
+      }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
       const d = await api('PATCH', `/organisations/${oid}/deliveries/letters/${args.letter_id}/send`, { json: { data: { id: args.letter_id, type: 'letters', attributes } } });
       return text({ submitted: letterRow(d.data) });
@@ -263,6 +277,12 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       return text({ cancelled: args.letter_id });
     }
     if (name === 'pingen_delete_letter') {
+      // Irreversible, and an agent tidying up is exactly when it gets called by
+      // accident. Cancelling a send is a different tool and stays ungated: that
+      // one is the safe direction.
+      if (args.confirm !== true) {
+        return text({ refused: 'confirm:true is required', note: 'the draft is gone for good; to stop a letter that is already on its way use pingen_cancel_letter' });
+      }
       await api('DELETE', `/organisations/${oid}/deliveries/letters/${args.letter_id}`);
       return text({ deleted: args.letter_id });
     }
@@ -280,7 +300,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         const j = JSON.parse(await r.text());
         const url = j.data?.attributes?.url || j.url;
         if (!url) throw new Error('Kein Datei-URL in der Antwort (Brief evtl. noch nicht verarbeitet).');
-        const f = await fetch(url); if (!f.ok) throw new Error(`Datei-Download ${f.status}`);
+        // Through http(), like everything else: this used to be a bare fetch,
+        // so the one request that moves the most bytes was the only unbounded
+        // one in the server, and a stalled bucket hung the client for ever.
+        const f = await http('Datei-Download', url, { timeout: TRANSFER_TIMEOUT_MS });
+        if (!f.ok) throw new Error(`Datei-Download ${f.status}`);
         bytes = Buffer.from(await f.arrayBuffer());
       }
       writeFileSync(args.output_path, bytes);
