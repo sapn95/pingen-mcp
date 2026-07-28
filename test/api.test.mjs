@@ -123,6 +123,14 @@ describe('reading', () => {
     assert.equal(row.price, '1.85 CHF');
   });
 
+  test('letters come back newest first, as the API was asked', async () => {
+    // The mock used to return insertion order whatever was asked for, so a
+    // regression that dropped the sort — or reversed it — was invisible.
+    const { data } = await srv.call('pingen_list_letters');
+    const ids = data.letters.map(l => l.id);
+    assert.deepEqual(ids.slice(0, 3), ['ltr-1', 'ltr-3', 'ltr-2'], `wrong order: ${ids}`);
+  });
+
   test('a letter with no price reports none rather than "undefined CHF"', async () => {
     const { data } = await srv.call('pingen_get_letter', { letter_id: 'ltr-2' });
     assert.equal(data.id, 'ltr-2');
