@@ -3,7 +3,7 @@
 // fake, so the worst a bug can do is post a letter to a mock.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { start, ORG } from './mock-pingen.mjs';
@@ -239,6 +239,27 @@ describe('failure paths', () => {
 });
 
 describe('downloads', () => {
+  test('a file descriptor is not an output path', async () => {
+    // writeFileSync takes a number as an fd: output_path 2 wrote the letter to
+    // stderr and 1 wrote it into the MCP stream itself.
+    for (const bad of [2, 1, '', null]) {
+      const { raw, isError } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: bad });
+      assert.ok(isError, `output_path ${JSON.stringify(bad)} was accepted`);
+      assert.match(raw, /muss ein Pfad sein|output_path/);
+    }
+    assert.ok(!srv.stderr().includes('%PDF'), 'a letter reached stderr');
+  });
+
+  test('a destination symlink is refused rather than followed', async () => {
+    const target = join(out, 'not-the-letter.txt');
+    writeFileSync(target, 'do not overwrite me');
+    const link = join(out, 'link.pdf');
+    symlinkSync(target, link);
+    const { isError } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: link });
+    assert.ok(isError, 'the symlink was followed');
+    assert.equal(readFileSync(target, 'utf8'), 'do not overwrite me');
+  });
+
   test('saves the PDF when the API answers with the bytes', async () => {
     const p = join(out, 'direct.pdf');
     const { data } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: p });
