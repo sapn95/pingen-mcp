@@ -22,15 +22,22 @@ jobs:
       - name: Syntax
         run: node --check index.js
 
+      - name: Lint
+        run: npm run lint
+
       # Protocol handshake + tool-schema validation. Offline: no network, no
-      # credentials, no browser download, so it is safe on a public runner.
+      # credentials, so it is safe on a public runner.
       - name: Smoke test
-        run: node scripts/smoke.mjs
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm run smoke
 
       - name: Hygiene (secrets, personal data, tracked state files)
-        run: node scripts/hygiene.mjs
+        run: npm run hygiene
+
+      # The suites drive the server over stdio against a local mock of
+      # api.pingen.com. They never reach the real API and cannot post a letter.
+      # Fails the build below 90% lines / 90% functions / 80% branches.
+      - name: Tests + coverage
+        run: npm run coverage
 
       - name: Audit
         run: npm audit --audit-level=high

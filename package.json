@@ -1,7 +1,7 @@
 {
   "name": "pingen-mcp",
   "version": "0.2.3",
-  "description": "MCP server for Pingen v2 — send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
+  "description": "MCP server for Pingen v2 \u2014 send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
   "type": "module",
   "bin": {
     "pingen-mcp": "index.js"
@@ -20,10 +20,14 @@
     "url": "git+https://github.com/sapn95/pingen-mcp.git"
   },
   "scripts": {
+    "start": "node index.js",
+    "lint": "eslint .",
     "smoke": "node scripts/smoke.mjs",
     "hygiene": "node scripts/hygiene.mjs",
-    "test": "node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs",
-    "prepublishOnly": "node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs"
+    "test": "node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs",
+    "coverage": "c8 --reporter=text-summary --include=index.js --check-coverage --lines 80 --functions 90 node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs",
+    "gate": "npm run lint && node scripts/smoke.mjs && node scripts/hygiene.mjs && npm run coverage",
+    "prepublishOnly": "npm run gate"
   },
   "files": [
     "index.js",
@@ -36,5 +40,11 @@
   },
   "overrides": {
     "@hono/node-server": "^2.0.12"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "c8": "^12.0.0",
+    "eslint": "^10.8.0",
+    "globals": "^17.8.0"
   }
 }

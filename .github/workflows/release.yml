@@ -51,9 +51,7 @@ jobs:
           test "$tag" = "$pkg" || { echo "tag $tag != package.json $pkg"; exit 1; }
 
       - name: Gate
-        run: node --check index.js && node scripts/smoke.mjs && node scripts/hygiene.mjs
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm run gate
 
       - name: Publish
         run: npm publish

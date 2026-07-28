@@ -9,3 +9,7 @@ node_modules/
 *.pem
 *.key
 secrets.json
+
+# Coverage output is generated, never committed.
+coverage/
+.nyc_output/
