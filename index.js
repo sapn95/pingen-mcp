@@ -371,7 +371,11 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     }
     if (name === 'pingen_letter_events') {
       const d = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/events?sort=-emitted_at`);
-      return text({ events: (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data })) });
+      // One page, and it used to be handed over as the whole history. A letter
+      // with a long tracking trail then looked like it had stopped moving.
+      const events = (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data }));
+      const more = d.links?.next || (d.meta?.total != null && d.meta.total > events.length);
+      return text({ events, ...(more ? { truncated: true, hint: 'Pingen meldet weitere Ereignisse — dies ist die erste Seite' } : {}) });
     }
     if (name === 'pingen_download_letter') {
       const r = await api('GET', `/organisations/${oid}/deliveries/letters/${lid}/file`, { raw: true });

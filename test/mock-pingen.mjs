@@ -25,6 +25,7 @@ const letter = (id, over = {}) => ({
     tracking_number: '98.12.345678.90',
     file_pages: 2,
     submitted_at: '2026-07-01T09:15:00+00:00',
+    created_at: '2026-07-01T09:00:00+00:00',
     price_value: 1.85,
     price_currency: 'CHF',
     ...over,
@@ -47,9 +48,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     slotBroken: false,    // flip to hand out a slot without a URL
     orgs: [{ id: ORG, type: 'organisations', attributes: { name: 'Test Org', plan: 'free', status: 'active' } }],
     letters: [
-      letter('ltr-1'),
-      letter('ltr-2', { status: 'draft', tracking_number: null, submitted_at: null, price_value: null, price_currency: null }),
-      letter('ltr-3'),
+      // Deliberately out of order in the array: the API is asked for
+      // newest-first, and a mock that hands back insertion order cannot show
+      // whether that was honoured.
+      letter('ltr-1', { created_at: '2026-07-03T09:00:00+00:00' }),
+      letter('ltr-2', { status: 'draft', tracking_number: null, submitted_at: null, price_value: null, price_currency: null, created_at: '2026-07-01T09:00:00+00:00' }),
+      letter('ltr-3', { created_at: '2026-07-02T09:00:00+00:00' }),
       letter('ltr-leak'),
     ],
   };
@@ -102,6 +106,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     }
     if (p.startsWith('/upload-slot/') && req.method === 'PUT') {
       const bytes = await read();
+      // The signed slot is issued for application/pdf, and a bucket can refuse
+      // the object without it. Accepting any type here meant dropping the
+      // header in production would have left every test green.
+      const ct = (req.headers['content-type'] || '').toLowerCase();
+      if (!ct.startsWith('application/pdf')) return send(400, { error: 'bad_content_type', got: ct }, 'application/json');
       if (state.uploadStatus !== 200) return send(state.uploadStatus, 'upload rejected', 'text/plain');
       state.uploads.push({ slot: p.slice('/upload-slot/'.length), bytes });
       return send(200, '', 'text/plain');
@@ -124,7 +133,13 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (!id) {
       if (req.method === 'GET') {
         const limit = Number(url.searchParams.get('page[limit]') || 20);
-        return send(200, { data: state.letters.slice(0, limit) });
+        // The mock used to ignore sort entirely, so a regression that asked for
+        // oldest-first — or forgot to ask at all — was invisible here.
+        const sort = url.searchParams.get('sort');
+        if (sort !== '-created_at') return send(400, { error: 'unsupported_sort', got: sort });
+        const newestFirst = [...state.letters].sort((a, b) =>
+          String(b.attributes?.created_at || '').localeCompare(String(a.attributes?.created_at || '')));
+        return send(200, { data: newestFirst.slice(0, limit) });
       }
       if (req.method === 'POST') {
         const body = JSON.parse((await read()).toString() || '{}');
