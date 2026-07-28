@@ -77,11 +77,16 @@ account pays for and franks the letter.
 Run these exactly (the service names must match what `index.js` reads). Replace
 the angle-bracket placeholders with your real values:
 
+`-w` without a value prompts instead of taking the secret from the command
+line, so it never reaches your shell history or a process listing — where a
+credential that can print and post mail at your expense has no business being.
+
 ```bash
-security add-generic-password -a pingen -s pingen-mcp-client-id     -w '<CLIENT_ID>'     -U
-security add-generic-password -a pingen -s pingen-mcp-client-secret -w '<CLIENT_SECRET>' -U
-# Optional — auto-detected from /organisations if you skip it:
-security add-generic-password -a pingen -s pingen-mcp-org-uuid      -w '<ORG_UUID>'      -U
+security add-generic-password -a pingen -s pingen-mcp-client-id     -w -U   # prompts
+security add-generic-password -a pingen -s pingen-mcp-client-secret -w -U   # prompts
+# Optional — auto-detected from /organisations if you skip it, and only when
+# the account has exactly one:
+security add-generic-password -a pingen -s pingen-mcp-org-uuid      -w -U   # prompts
 ```
 
 The exact service names read by `index.js` are:

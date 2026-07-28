@@ -35,8 +35,13 @@ const PERSONAL = [
   [/\b[A-ZÄÖÜ][a-zäöü]+(strasse|gasse|weg|platz)\s+\d{1,3}\b/, 'street address'],
 ];
 
-const files = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n')
-  .filter(f => f && !/^(package-lock\.json|.*\.(png|jpg|jpeg|pdf|ico))$/.test(f));
+// The lockfile used to be skipped wholesale, and it is exactly where an
+// authenticated registry URL ends up. Binary assets are still skipped for the
+// text rules — there is nothing to match — but a tracked PDF or screenshot is
+// reported, because in these repos there is no reason for one to exist.
+const tracked = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean);
+const BINARY = /\.(png|jpg|jpeg|gif|pdf|ico|zip|gz)$/i;
+const files = tracked.filter(f => !BINARY.test(f));
 
 // Terms that identify the author cannot be listed here — writing them down in a
 // public repo is the very thing this guards against. They live in an untracked
@@ -52,7 +57,15 @@ const denylist = existsSync(DENYLIST_PATH)
 let bad = 0;
 for (const f of files) {
   let body;
-  try { body = readFileSync(f, 'utf8'); } catch { continue; }
+  // What gets committed is the INDEX, not the working tree. Reading the file
+  // from disk meant a secret could be staged and then removed from the working
+  // copy, and this gate would wave it through into the commit. Prefer the
+  // staged blob; fall back to disk for files that are tracked but unstaged.
+  try {
+    body = execFileSync('git', ['show', `:${f}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    try { body = readFileSync(f, 'utf8'); } catch { continue; }
+  }
   // A source file writes a multi-line postal address as one string with \n in
   // it — two literal characters, not a break. The word-boundary anchors then
   // see `n` running into the capital and match nothing, so an address inside a
@@ -81,9 +94,14 @@ for (const f of files) {
   }
 }
 
-// A session/state file must never be tracked, whatever .gitignore says.
-for (const f of files) {
-  if (/(^|\/)(state\.json|\.env|.*token.*cache.*)$/.test(f)) { console.log(`FAIL  ${f}: session/credential file is tracked`); bad++; }
+// A session/state file must never be tracked, whatever .gitignore says. The
+// pattern matched `.env` exactly, so `.env.local` and `.env.production` — the
+// ones people actually fill in — went straight past it.
+for (const f of tracked) {
+  if (/(^|\/)(state\.json|\.env(\..+)?|.*token.*cache.*)$/.test(f) && !/\.env\.(example|sample|template)$/.test(f)) {
+    console.log(`FAIL  ${f}: session/credential file is tracked`); bad++;
+  }
+  if (/\.(pdf|png|jpg|jpeg)$/i.test(f)) { console.log(`FAIL  ${f}: a tracked document or screenshot — these repos have no reason to hold one`); bad++; }
 }
 
 // Commits carry an identity too, and no scan of the working tree can see it.
