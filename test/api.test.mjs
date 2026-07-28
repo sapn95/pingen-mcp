@@ -76,6 +76,24 @@ describe('authentication', () => {
     await s.stop();
   });
 
+  test('two organisations is a question, not a default', async () => {
+    // Taking the first would decide — silently — which account pays for and
+    // franks the letter. Only zero and one were ever covered here.
+    const two = await start();
+    two.state.orgs = [
+      { id: 'org-a', type: 'organisations', attributes: { name: 'Example One' } },
+      { id: 'org-b', type: 'organisations', attributes: { name: 'Example Two' } },
+    ];
+    const s2 = await startServer({ PINGEN_API_BASE: two.base, PINGEN_ORG_UUID: '' });
+    const { raw, isError } = await s2.call('pingen_list_letters');
+    assert.ok(isError, 'it chose one');
+    assert.match(raw, /PINGEN_ORG_UUID/);
+    assert.match(raw, /org-a/, 'and lists them so the choice can be made');
+    assert.ok(!two.state.calls.some(c => c.includes('/deliveries/letters')), 'it asked an organisation anyway');
+    await s2.stop();
+    await two.close();
+  });
+
   test('an account without organisations says so instead of guessing', async () => {
     const bare = await start();
     bare.state.orgs = [];

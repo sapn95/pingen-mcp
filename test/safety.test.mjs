@@ -74,6 +74,15 @@ describe('nothing is mailed by accident', () => {
     assert.equal(mock.state.submitted.length, before);
   });
 
+  test('a confirmed submission without a product mails nothing', async () => {
+    // required: in a schema is a hint to the client, not a check. Without a
+    // product Pingen franks the letter however it likes — and it is in the post.
+    const before = mock.state.submitted.length;
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', confirm: true });
+    assert.match(data.refused, /delivery_product/);
+    assert.equal(mock.state.submitted.length, before);
+  });
+
   test('deleting without confirm removes nothing', async () => {
     const { data } = await srv.call('pingen_delete_letter', { letter_id: 'ltr-3' });
     assert.match(data.refused, /confirm:true/);
