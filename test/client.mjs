@@ -34,7 +34,20 @@ export const FAKE = {
 export async function startServer(env = {}, { timeout = 30000 } = {}) {
   // `undefined` means "unset this variable for the child", which is how a test
   // asks for the keychain path; an empty string means "set, but empty".
-  const merged = { ...process.env, ...FAKE, PATH: `${NULL_KEYCHAIN}:${process.env.PATH}`, ...env };
+  // PINGEN_AUTH_BASE is inherited from the developer's shell otherwise, and a
+  // suite that says it cannot reach the network would then mint tokens against
+  // whatever that variable happens to point at. Everything a test does not name
+  // explicitly is pinned to the mock or blanked.
+  const merged = {
+    ...process.env, ...FAKE,
+    // Removed, not set: setting it would make the server report
+    // PINGEN_AUTH_BASE as the variable at fault when the API base is the one
+    // that is wrong. Absent, the production fallback to the API host applies,
+    // which is the behaviour under test.
+    PINGEN_AUTH_BASE: undefined,
+    PATH: `${NULL_KEYCHAIN}:${process.env.PATH}`,
+    ...env,
+  };
   for (const [k, v] of Object.entries(merged)) if (v === undefined) delete merged[k];
 
   const child = spawn(process.execPath, [ENTRY], { stdio: ['pipe', 'pipe', 'pipe'], env: merged });

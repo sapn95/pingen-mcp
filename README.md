@@ -67,8 +67,10 @@ and test; you only pay when you actually mail a letter.
 
 Each Pingen organisation has a UUID. It appears in the dashboard URL when the
 organisation is selected (`https://app.pingen.com/.../organisations/<UUID>/...`),
-or under **Settings → Organisation**. It is optional: if you omit it, the server
-calls `GET /organisations` and uses your first organisation automatically.
+or under **Settings → Organisation**. It is optional only when your account has exactly one
+organisation: the server then calls `GET /organisations` and uses it. With
+several, it refuses and lists them rather than deciding — silently — which
+account pays for and franks the letter.
 
 ### 4. Store all three in the macOS keychain
 

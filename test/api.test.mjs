@@ -40,9 +40,14 @@ describe('protocol', () => {
     }
   });
 
-  test('an unknown tool is answered, not crashed on', async () => {
-    const { data } = await srv.call('pingen_teleport_letter');
-    assert.match(data.error, /unknown tool/);
+  test('an unknown tool is an error, and authenticates nothing on the way', async () => {
+    // It used to come back as a perfectly successful result, and only after
+    // resolving an organisation on behalf of a call that was never valid.
+    const before = mock.state.calls.length;
+    const { raw, isError } = await srv.call('pingen_teleport_letter');
+    assert.equal(isError, true, 'a client that asked for nothing real must be told so');
+    assert.match(raw, /unknown tool/);
+    assert.equal(mock.state.calls.length, before, 'and no request was made for it');
   });
 });
 
@@ -154,7 +159,8 @@ describe('sending', () => {
   test('auto_send=true is reported as a send, not as a draft', async () => {
     const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
     assert.equal(mock.state.created.at(-1).auto_send, true);
-    assert.match(data.note, /versandt/);
+    assert.doesNotMatch(data.note, /nichts versandt/, 'the draft note also contains "versandt"');
+    assert.match(data.note, /wird versandt/);
   });
 
   test('submits a draft with PATCH and the documented print defaults', async () => {
