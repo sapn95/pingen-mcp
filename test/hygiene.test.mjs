@@ -28,7 +28,7 @@ const AWS_KEY = 'AKIA' + 'Q'.repeat(16);
 const gitIn = dir => (...a) => spawnSync('git', a, { cwd: dir, env: GIT_ENV, encoding: 'utf8' });
 
 function repo(files) {
-  const dir = mkdtempSync(join(tmpdir(), 'pingen-hygiene-'));
+  const dir = mkdtempSync(join(tmpdir(), 'mcp-hygiene-'));
   const git = gitIn(dir);
   git('init', '-q');
   // example.com is one of the addresses the scan accepts as identifying nobody,
@@ -41,12 +41,13 @@ function repo(files) {
   return dir;
 }
 
-function scan(dir) {
+function scan(dir, denylist = join(dir, 'no-such-denylist')) {
   const r = spawnSync(process.execPath, [SCAN], {
     cwd: dir, encoding: 'utf8',
-    // A denylist path that cannot exist: the scan must not read the developer's
-    // real one, and no test may depend on whether they keep one.
-    env: { ...GIT_ENV, HYGIENE_DENYLIST: join(dir, 'no-such-denylist') },
+    // A denylist path that cannot exist unless a test asks for one: the scan
+    // must not read the developer's real list, and no test may depend on
+    // whether they keep one.
+    env: { ...GIT_ENV, HYGIENE_DENYLIST: denylist },
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -121,6 +122,64 @@ describe('the hygiene scan', () => {
     const { code, out } = scan(dir);
     assert.equal(code, 1, out);
     assert.match(out, /notes\.txt[^:\n]*:4: AWS access key/, `pointed at a line the file does not reach:\n${out}`);
+  });
+
+  test('an address belonging to somebody is a finding, an SSH remote is not', () => {
+    // This is the rule that cannot be written down as a list, so it works the
+    // other way round: everything that is not one of the reserved example
+    // domains counts. `git@github.com:owner/repo` is a remote rather than a
+    // person, and reporting it would teach the reader to wave the whole check
+    // through.
+    // Assembled, never written down — for the same reason AWS_KEY is. Spelled
+    // out here, this file would be a tracked file with somebody's address in
+    // it, and the scan would be quite right to fail on it.
+    const LOCAL = 'a.person', DOMAIN = 'some-provider' + '.ch';
+    const dir = repo({
+      'remote.txt': 'git' + '@github.com:someone/somewhere.git\n',
+      'notes.txt': `reply came back from ${LOCAL}@${DOMAIN} instead\n`,
+    });
+    const { code, out } = scan(dir);
+    assert.equal(code, 1, out);
+    assert.ok(out.includes(`email address at @${DOMAIN}`), `the domain is what says where to look:\n${out}`);
+    // Same rule as for a secret: the finding says where to look, not what it is.
+    assert.ok(!out.includes(LOCAL), `the address was echoed into the report:\n${out}`);
+    assert.ok(!/github\.com/.test(out), `an SSH remote was read as somebody's address:\n${out}`);
+  });
+
+  test('a denylisted name is caught in either normalisation', () => {
+    // The terms that identify the author cannot live in this repository, so the
+    // list is read from outside it. The names that leaked the first time came
+    // out of the service in NFD — a umlaut written as a plus a combining
+    // diaeresis — and a byte-exact search walked straight past them.
+    const list = join(mkdtempSync(join(tmpdir(), 'mcp-denylist-')), 'denylist.txt');
+    writeFileSync(list, '# a comment, and a blank line follow\n\nSchnürkli\n');
+    // Written out decomposed on purpose, and not by hand: an editor would
+    // normalise it back the moment the file was saved.
+    const decomposed = 'Schn' + '\u0075\u0308' + 'rkli';
+    assert.equal(decomposed.length, 10, 'the fixture is meant to be NFD');
+    const dir = repo({ 'notes.txt': `Absender: ${decomposed} AG\n` });
+    const { code, out } = scan(dir, list);
+    assert.equal(code, 1, `NFD walked past the list:\n${out}`);
+    assert.match(out, /denylisted term \(9 chars\)/);
+    assert.ok(!out.includes('chn'), `the term was echoed into the report:\n${out}`);
+  });
+
+  test('a tracked path that yields no readable copy at all is a failure', () => {
+    // Every miss this scan has had took the same shape: a path it could not
+    // open, both reads throwing, both throws swallowed, and the summary going
+    // on to call the repository clean. Whatever the reason turns out to be next
+    // time, not having scanned something is not the same as having found
+    // nothing in it.
+    const dir = repo({ 'readme.md': 'nothing of interest here\n' });
+    const git = gitIn(dir);
+    // An index entry pointing at an object that is not in the repository, and
+    // nothing of that name on disk either — the state a partial clone or a
+    // pruned object store leaves behind.
+    const missing = 'e'.repeat(40);
+    git('update-index', '--add', '--cacheinfo', `100644,${missing},ghost.txt`);
+    const { code, out } = scan(dir);
+    assert.equal(code, 1, `it was skipped in silence:\n${out}`);
+    assert.match(out, /ghost\.txt: tracked, but no copy of it could be read/);
   });
 
   test('scans the working tree during an unfinished merge, and quietly', () => {
