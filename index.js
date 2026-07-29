@@ -627,14 +627,30 @@ const callTool = async req => {
       // the key, not the sentence. So the receipt is issued only when Pingen
       // says it took the letter; otherwise the letter still comes back, under a
       // name that claims nothing either way, and the note says what is known.
+      //
+      // And the resting branch here ended "danach erneut senden", which is the
+      // same advice the create note was taken apart for the round before, in
+      // the same two statuses, under a different verb. BLOCKED was written for
+      // exactly this — Pingen has read the PDF and will not take it — and then
+      // applied in one of the two places that branch on RESTING. Left as it
+      // was, the pair now contradicted each other about an identical status:
+      // pingen_send_letter said "submit will not move it, upload a corrected
+      // PDF" and pingen_submit_letter said "have another go", so which of the
+      // two a reader saw last decided whether the address got fixed or the same
+      // refusal got asked for again. This branch is the one being read at the
+      // moment it matters, because it is the answer to the call that was meant
+      // to put the letter in the post — and the retry it recommends is free, so
+      // there is no bill to notice that the letter never went.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
       const accepted = MOVING.has(status);
       const note = accepted
         ? `Pingen meldet Status "${shown}" — zum Druck angenommen, der Brief geht raus.`
-        : RESTING.has(status)
-          ? `Pingen meldet Status "${shown}" — der Brief liegt weiterhin bei Pingen und ist NICHT unterwegs. Ursache prüfen: pingen_get_letter, danach erneut senden.`
-          : `Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter, und nicht blind ein zweites Mal senden.`;
+        : BLOCKED.has(status)
+          ? `Pingen meldet Status "${shown}" — der Brief ist NICHT unterwegs, und Pingen nimmt ihn in diesem Zustand auch nicht zum Druck an: ein zweiter Aufruf von pingen_submit_letter bringt ihn so nicht auf den Weg. Ursache prüfen: pingen_get_letter oder das Dashboard (bei action_required meist Adressfenster oder Frankierzone im PDF), dann ein korrigiertes PDF mit pingen_send_letter hochladen.`
+          : RESTING.has(status)
+            ? `Pingen meldet Status "${shown}" — der Brief liegt weiterhin bei Pingen und ist NICHT unterwegs. Ursache prüfen: pingen_get_letter, danach erneut senden.`
+            : `Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter, und nicht blind ein zweites Mal senden.`;
       const row = letterRow(d.data);
       return text({ ...(accepted ? { submitted: row } : { letter: row }), note });
     }

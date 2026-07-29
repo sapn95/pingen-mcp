@@ -384,6 +384,52 @@ describe('nothing is mailed by accident', () => {
     }
   });
 
+  test('a refused letter is not answered with "send it again"', async () => {
+    // Last round split the create note so that action_required and invalid stop
+    // being called ready to post, and gave the reason: Pingen has read the PDF
+    // and will not take it, so telling the caller to submit is telling them to
+    // do the one thing the README says cannot be done. The other place that
+    // branches on the same list never got the same split. Its resting note ends
+    // "Ursache prüfen: pingen_get_letter, danach erneut senden.", which for
+    // draft and valid is exactly right and for these two is the identical wrong
+    // advice under a different verb — and it is now advice that contradicts
+    // what the sibling tool says about the very same status, so whichever of
+    // the two a reader saw last decides whether they fix the PDF or retry in a
+    // circle. Nothing here is billed for, which is why it survives: a refused
+    // submit costs an API call, and the letter that was supposed to go out
+    // simply never does.
+    for (const st of ['action_required', 'invalid']) {
+      mock.state.sendStatus = st;
+      const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+      mock.state.sendStatus = null;
+      assert.equal(data.letter.status, st, 'the fixture did answer with it');
+      // Case-insensitive on purpose: the first draft of the fix said "Erneut
+      // senden ändert daran nichts", which is the right meaning and would have
+      // walked straight through a case-sensitive assertion on the strength of
+      // one capital letter. A test that can be satisfied by shift is not a test.
+      assert.doesNotMatch(data.note, /erneut senden/i,
+        `${st}: told the caller to submit a letter Pingen had just refused: ${data.note}`);
+      assert.match(data.note, new RegExp(st), `${st}: the note never said what Pingen answered: ${data.note}`);
+      assert.match(data.note, /korrigiertes PDF/, `${st}: and never named the one thing that helps: ${data.note}`);
+    }
+  });
+
+  test('a letter that is merely still sitting there is still worth retrying', async () => {
+    // The half that must not become collateral, and the reason the split is a
+    // split rather than a rewrite: draft and valid are Pingen holding a letter
+    // it has not refused, and for those "check why, then send again" is the
+    // correct next step. Turning every resting answer into "upload a new PDF"
+    // would send a caller off to redo work over a letter that was fine.
+    for (const st of ['draft', 'valid']) {
+      mock.state.sendStatus = st;
+      const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+      mock.state.sendStatus = null;
+      assert.equal(data.letter.status, st);
+      assert.match(data.note, /erneut senden/i, `${st}: stopped saying what to do next: ${data.note}`);
+      assert.doesNotMatch(data.note, /korrigiertes PDF/, `${st}: sent the caller off to redo a letter Pingen never objected to: ${data.note}`);
+    }
+  });
+
   test('a submission Pingen did take is reported as one', async () => {
     // The half that must keep working: an answer that says the letter has been
     // taken for printing has to read as a send, or the note becomes noise and
