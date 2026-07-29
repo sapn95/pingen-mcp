@@ -162,6 +162,29 @@ describe('reading', () => {
     assert.equal(data.truncated, undefined, 'cried wolf over a complete list');
   });
 
+  test('at the largest page it stops asking for a larger one', async () => {
+    // The truncation note told a caller who had already asked for 100 to raise
+    // the limit, which is advice nobody can follow: 100 is the cap and there is
+    // no page parameter, so the older letters are not reachable through this
+    // tool at all. A model that is told to raise a limit it is already at
+    // raises it again, gets the same hundred back, and asks a paid API in a
+    // circle.
+    const many = await start();
+    many.state.letters = Array.from({ length: 150 }, (_, i) => ({
+      id: `ltr-${String(i).padStart(3, '0')}`,
+      type: 'letters',
+      attributes: { status: 'sent', created_at: `2026-01-01T00:${String(i % 60).padStart(2, '0')}:00+00:00` },
+    }));
+    const s = await startServer({ PINGEN_API_BASE: many.base });
+    const { data } = await s.call('pingen_list_letters', { limit: 100 });
+    await s.stop();
+    await many.close();
+    assert.equal(data.letters.length, 100);
+    assert.equal(data.truncated, true, 'it still has to say the list is not the whole list');
+    assert.doesNotMatch(data.hint, /erhöhen/, `told to raise a limit already at the maximum: ${data.hint}`);
+    assert.match(data.hint, /pingen_get_letter/, 'and says what is left to do instead');
+  });
+
   test('reads the tracking history', async () => {
     const { data } = await srv.call('pingen_letter_events', { letter_id: 'ltr-1' });
     assert.equal(data.events.length, 2);

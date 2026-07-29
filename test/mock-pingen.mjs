@@ -46,6 +46,16 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     deleted: [],
     uploadStatus: 200,    // flip to fail the PUT of the bytes
     slotBroken: false,    // flip to hand out a slot without a URL
+    // A real authorisation server hands out a different bearer every time and
+    // says how long it lasts. Answering with one constant token for ever meant
+    // a server that had lost track of a token it used to hold looked exactly
+    // like one that had not. Off by default, so nothing else changes.
+    rotateTokens: false,
+    tokenTtl: 3600,       // drop this and the server re-grants on every call
+    issuedTokens: [],
+    // Set to a promise to hold the letter that fails loudly open, so a second
+    // call can overtake it while its response is still on the way back.
+    holdLeak: null,
     orgs: [{ id: ORG, type: 'organisations', attributes: { name: 'Test Org', plan: 'free', status: 'active' } }],
     letters: [
       // Deliberately out of order in the array: the API is asked for
@@ -59,7 +69,13 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
   };
 
   let base = '';
-  const bearerOk = req => (req.headers.authorization || '') === `Bearer ${TOKEN}`;
+  // Any bearer this mock has actually issued, not one hardcoded name: with
+  // rotation on there is more than one, and every one of them was valid when it
+  // was handed out.
+  const bearerOk = req => {
+    const h = req.headers.authorization || '';
+    return h === `Bearer ${TOKEN}` || state.issuedTokens.some(t => h === `Bearer ${t}`);
+  };
   const srv = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     const p = url.pathname;
@@ -94,7 +110,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       if (form.get('grant_type') !== 'client_credentials' || !form.get('client_id') || !form.get('client_secret')) {
         return send(400, { error: 'invalid_request' });
       }
-      return send(200, { access_token: TOKEN, token_type: 'bearer', expires_in: 3600 });
+      const issued = state.rotateTokens ? `${TOKEN}-g${state.tokenGrants}` : TOKEN;
+      state.issuedTokens.push(issued);
+      return send(200, { access_token: issued, token_type: 'bearer', expires_in: state.tokenTtl });
     }
 
     // --- the signed upload slot, and the bucket it points at -----------------
@@ -171,8 +189,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     const known = state.letters.find(l => l.id === id);
     if (!known) return send(404, { error: 'not_found', id });
 
-    // The letter that makes the upstream fail loudly, token and all.
+    // The letter that makes the upstream fail loudly, token and all. Held open
+    // when a test asks for it, so the bearer quoted back here can be one the
+    // server has already replaced by the time it reads the answer.
     if (id === 'ltr-leak' && tail !== 'file') {
+      if (state.holdLeak) await state.holdLeak;
       return send(500, `{"error":"internal","request":{"authorization":"${req.headers.authorization}"}}`);
     }
 

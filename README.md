@@ -176,7 +176,7 @@ still needs something (e.g. the address couldn't be read), the draft is
 | Tool | Parameters | What it does / returns |
 | --- | --- | --- |
 | `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. |
-| `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. |
+| `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. One page only: if Pingen has more, the result also carries `truncated: true` — so *"nothing went to that address"* is never concluded from a list that was never read to the end. |
 | `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately. |
 | `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. Returns the submitted letter row. |
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |

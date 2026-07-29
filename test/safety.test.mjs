@@ -215,6 +215,41 @@ describe('credentials never leave the process', () => {
     assert.match(raw, /\*\*\*/, 'it is masked, not merely truncated');
   });
 
+  test('a token the process has replaced is still redacted', async () => {
+    // The redactor masked whatever the token variable held at the moment the
+    // error came back, which is not the same thing as the token the failing
+    // request was sent with. Two tool calls are all it takes: the second one
+    // re-grants — after a 401, or simply because the first token was near
+    // expiry — while the first is still in flight, and this API answers a 500
+    // by quoting the Authorization header it was given. The bearer that came
+    // back was then one the redactor had never heard of, and it went into the
+    // tool result verbatim while it was still valid.
+    const m = await start();
+    m.state.rotateTokens = true;
+    m.state.tokenTtl = 1;                  // near expiry on arrival: every call re-grants
+    let release;
+    m.state.holdLeak = new Promise(r => { release = r; });
+    const s = await startServer({ PINGEN_API_BASE: m.base });
+    const slow = s.call('pingen_get_letter', { letter_id: 'ltr-leak' });
+    // Released before it has even reached the mock there is only ever one
+    // token, and the test would pass against the bug it is written for.
+    const deadline = Date.now() + 10000;
+    while (!m.state.calls.some(c => c.endsWith('/ltr-leak')) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    await s.call('pingen_get_letter', { letter_id: 'ltr-1' });
+    release();
+    const { raw, isError } = await slow;
+    const [stale] = m.state.issuedTokens;
+    const grants = m.state.issuedTokens.length;
+    await s.stop();
+    await m.close();
+    assert.ok(grants >= 2, `the fixture never rotated the token (${grants} grant(s))`);
+    assert.ok(isError, 'the failure is still reported');
+    assert.ok(!raw.includes(stale), `a bearer this process issued reached a tool result: ${raw}`);
+    assert.match(raw, /\*\*\*/, 'it is masked, not merely absent');
+  });
+
   test('a rejected grant does not echo the client secret back, in any encoding', async () => {
     const bad = await start({ tokenStatus: 401 });
     const s = await startServer({ PINGEN_API_BASE: bad.base });
