@@ -182,7 +182,7 @@ still needs something (e.g. the address couldn't be read), the draft is
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |
 | `pingen_cancel_letter` | `letter_id` (required) | Cancels an already-submitted/sent letter where Pingen still allows it. Returns `{ cancelled: <id> }`. |
 | `pingen_delete_letter` | `letter_id` (required); **`confirm: true` (required)** | Deletes a draft / not-yet-sent letter for good. To stop a letter already on its way use `pingen_cancel_letter`. Returns `{ deleted: <id> }`. |
-| `pingen_letter_events` | `letter_id` (required) | Tracking/status history (created → submitted → sent → delivered → undeliverable …): `type`, `at`, `detail`. |
+| `pingen_letter_events` | `letter_id` (required) | Tracking/status history (created → submitted → sent → delivered → undeliverable …): `type`, `at`, `detail`. First page only; `truncated: true` when Pingen reports more, so a letter that is still moving is never read as one that has stopped. |
 | `pingen_download_letter` | `letter_id` (required); `output_path` (required) | Downloads the final letter PDF to `output_path` (available once processed/sent). Returns `{ saved, bytes }`. |
 
 ### Example
