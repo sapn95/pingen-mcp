@@ -50,9 +50,48 @@ const PERSONAL = [
 // escaping also stopped the .env and tracked-document rules below from matching,
 // because the name they saw ended in a quote. -z writes the real bytes and
 // separates them with NUL, so there is nothing to unescape.
-const tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
+//
+// -z was only half of it, though, and the half that was left let the very same
+// file through again. execFileSync decodes what git wrote as UTF-8, so a path
+// whose bytes are not valid UTF-8 — an ordinary Latin-1 file name out of a
+// repository written on Linux — still arrives with a replacement character
+// where the byte was, and `git show :<that>` and readFileSync(<that>) both go
+// looking for a name no file has ever had. So the object id comes along too:
+// the staged copy is fetched by content address, with no path in it at all,
+// and the working copy is opened with the raw bytes rather than a decoding of
+// them. Nothing here has to survive a round trip through a string any more.
+function trackedEntries() {
+  const raw = execFileSync('git', ['ls-files', '-sz'], { maxBuffer: 64 * 1024 * 1024 });
+  const byPath = new Map();
+  for (let start = 0; start < raw.length;) {
+    let end = raw.indexOf(0, start);
+    if (end < 0) end = raw.length;
+    const record = raw.subarray(start, end);
+    start = end + 1;
+    // `<mode> SP <object> SP <stage> TAB <path>` — everything before the tab is
+    // ASCII, the path after it is whatever bytes git is holding.
+    const tab = record.indexOf(0x09);
+    if (tab < 0) continue;
+    const [mode, sha, stage] = record.subarray(0, tab).toString('latin1').split(' ');
+    const path = record.subarray(tab + 1);
+    // latin1 is a byte-for-byte mapping, so it is the honest key for a path and
+    // the honest thing to match the ASCII name rules against; the UTF-8 reading
+    // is for the report, where a mangled character is only ugly.
+    const bytes = path.toString('latin1');
+    const entry = byPath.get(bytes) || { path, bytes, name: path.toString('utf8'), mode, sha: null };
+    // Only stage 0 is a staged copy. A conflicted path sits at stages 1 to 3
+    // and at no stage 0, and there the copy that a hurried `git add -A` would
+    // commit next is the one in the working tree — which is read below either
+    // way, so a conflict is scanned exactly as it was before.
+    if (stage === '0') entry.sha = sha;
+    byPath.set(bytes, entry);
+  }
+  return [...byPath.values()];
+}
+
+const tracked = trackedEntries();
 const BINARY = /\.(png|jpg|jpeg|gif|pdf|ico|zip|gz)$/i;
-const files = tracked.filter(f => !BINARY.test(f));
+const files = tracked.filter(e => !BINARY.test(e.bytes));
 
 // Terms that identify the author cannot be listed here — writing them down in a
 // public repo is the very thing this guards against. They live in an untracked
@@ -66,58 +105,75 @@ const denylist = existsSync(DENYLIST_PATH)
   : null;
 
 let bad = 0;
-for (const f of files) {
+for (const e of files) {
+  // A gitlink is another repository's commit id, not a file here: there is
+  // nothing to open and nothing to leak.
+  if (e.mode === '160000') continue;
   // BOTH versions, because they are two different exposures. What gets
   // committed is the INDEX — a secret staged and then wiped from the working
   // copy would otherwise sail through. What `npm publish` packs is the WORKING
   // TREE — so preferring the index, as this did for a while, let an unstaged
-  // secret into a tarball instead. Identical content is scanned once.
+  // secret into a tarball instead. Identical content is scanned once, and each
+  // copy keeps its own name, because a report has to say where to go and look.
   //
   // stderr goes nowhere on purpose: execFileSync forwards the child's by
-  // default, so every path git could not resolve printed a two-line "fatal:
-  // ambiguous argument" into the report — noise that reads like a scanner
-  // failure and that the catch was written to keep quiet about.
-  const versions = new Set();
-  try { versions.add(execFileSync('git', ['show', `:${f}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] })); } catch { /* not staged */ }
-  try { versions.add(readFileSync(f, 'utf8')); } catch { /* deleted from disk */ }
-  if (!versions.size) continue;
-  const body = [...versions].join('\n');
-  // A source file writes a multi-line postal address as one string with \n in
-  // it — two literal characters, not a break. The word-boundary anchors then
-  // see `n` running into the capital and match nothing, so an address inside a
-  // string literal walked past the whole scan. Treat the escapes as the breaks
-  // they stand for.
-  const scan = body.replace(/\\[nrt]/g, ' ');
-  for (const [re, what] of [...SECRETS, ...PERSONAL]) {
-    const m = re.exec(scan);
-    // Location and category only. Printing the match put the secret into the
-    // CI log of the job whose entire purpose is to keep it out: an AWS key id
-    // is 20 characters and fitted inside the excerpt whole.
-    if (m) { console.log(`FAIL  ${f}:${scan.slice(0, m.index).split('\n').length}: ${what} (${m[0].length} chars)`); bad++; }
+  // default, so every object git could not resolve printed a two-line "fatal:"
+  // into the report — noise that reads like a scanner failure and that the
+  // catch was written to keep quiet about.
+  const versions = new Map();
+  const note = (body, where) => versions.set(body, versions.has(body) ? `${versions.get(body)}, ${where}` : where);
+  if (e.sha) {
+    try { note(execFileSync('git', ['cat-file', 'blob', e.sha], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }), 'index'); } catch { /* object gone */ }
   }
-  for (const m of body.matchAll(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g)) {
-    // `git@github.com:owner/repo` is an SSH URL, not somebody's address; the
-    // trailing colon is what tells the two apart.
-    if (m[0].startsWith('git@') && body[m.index + m[0].length] === ':') continue;
-    // The address is the finding, and it is the thing that must not be echoed;
-    // the domain is enough to find it.
-    if (!MAIL_OK.test(m[0])) { console.log(`FAIL  ${f}: email address at @${m[0].split('@')[1]}`); bad++; }
+  try { note(readFileSync(e.path, 'utf8'), 'working tree'); } catch { /* deleted from disk */ }
+  // Nothing gets skipped in silence again. A tracked path that yields no
+  // readable copy at all is the shape every one of these misses has taken so
+  // far, and each time the summary went on to count the file as clean.
+  if (!versions.size) {
+    console.log(`FAIL  ${e.name}: tracked, but no copy of it could be read — nothing was scanned`); bad++; continue;
   }
-  // Compared NFC-folded: the names that leaked last time arrived from the
-  // service in NFD, so a byte-exact search walked straight past them.
-  for (const term of denylist || []) {
-    if (nfc(scan).includes(term)) { console.log(`FAIL  ${f}: denylisted term (${term.length} chars)`); bad++; }
+  for (const [body, where] of versions) {
+    // Each copy on its own. Scanning the two of them glued together reported a
+    // line number counted through the whole join, so a key on line 4 of a
+    // four-line file was announced at line 45 and read like a false positive.
+    const at = `${e.name} (${where})`;
+    // A source file writes a multi-line postal address as one string with \n in
+    // it — two literal characters, not a break. The word-boundary anchors then
+    // see `n` running into the capital and match nothing, so an address inside a
+    // string literal walked past the whole scan. Treat the escapes as the breaks
+    // they stand for.
+    const scan = body.replace(/\\[nrt]/g, ' ');
+    for (const [re, what] of [...SECRETS, ...PERSONAL]) {
+      const m = re.exec(scan);
+      // Location and category only. Printing the match put the secret into the
+      // CI log of the job whose entire purpose is to keep it out: an AWS key id
+      // is 20 characters and fitted inside the excerpt whole.
+      if (m) { console.log(`FAIL  ${at}:${scan.slice(0, m.index).split('\n').length}: ${what} (${m[0].length} chars)`); bad++; }
+    }
+    for (const m of body.matchAll(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g)) {
+      // `git@github.com:owner/repo` is an SSH URL, not somebody's address; the
+      // trailing colon is what tells the two apart.
+      if (m[0].startsWith('git@') && body[m.index + m[0].length] === ':') continue;
+      // The address is the finding, and it is the thing that must not be echoed;
+      // the domain is enough to find it.
+      if (!MAIL_OK.test(m[0])) { console.log(`FAIL  ${at}: email address at @${m[0].split('@')[1]}`); bad++; }
+    }
+    // Compared NFC-folded: the names that leaked last time arrived from the
+    // service in NFD, so a byte-exact search walked straight past them.
+    for (const term of denylist || []) {
+      if (nfc(scan).includes(term)) { console.log(`FAIL  ${at}: denylisted term (${term.length} chars)`); bad++; }
+    }
   }
 }
 
 // A session/state file must never be tracked, whatever .gitignore says. The
 // pattern matched `.env` exactly, so `.env.local` and `.env.production` — the
 // ones people actually fill in — went straight past it.
-for (const f of tracked) {
-  if (/(^|\/)(state\.json|\.env(\..+)?|.*token.*cache.*)$/.test(f) && !/\.env\.(example|sample|template)$/.test(f)) {
-    console.log(`FAIL  ${f}: session/credential file is tracked`); bad++;
+for (const e of tracked) {
+  if (/(^|\/)(state\.json|\.env(\..+)?|.*token.*cache.*)$/.test(e.bytes) && !/\.env\.(example|sample|template)$/.test(e.bytes)) {
+    console.log(`FAIL  ${e.name}: session/credential file is tracked`); bad++;
   }
-  if (/\.(pdf|png|jpg|jpeg)$/i.test(f)) { console.log(`FAIL  ${f}: a tracked document or screenshot — these repos have no reason to hold one`); bad++; }
+  if (/\.(pdf|png|jpg|jpeg)$/i.test(e.bytes)) { console.log(`FAIL  ${e.name}: a tracked document or screenshot — these repos have no reason to hold one`); bad++; }
 }
 
 // Commits carry an identity too, and no scan of the working tree can see it.

@@ -139,7 +139,16 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         if (sort !== '-created_at') return send(400, { error: 'unsupported_sort', got: sort });
         const newestFirst = [...state.letters].sort((a, b) =>
           String(b.attributes?.created_at || '').localeCompare(String(a.attributes?.created_at || '')));
-        return send(200, { data: newestFirst.slice(0, limit) });
+        const page = newestFirst.slice(0, limit);
+        // The real collection endpoint paginates and says so, with the total in
+        // meta and a next link. Answering with a bare `data` array meant a tool
+        // that handed one page over as the whole list looked exactly like one
+        // that had read the list to the end.
+        return send(200, {
+          data: page,
+          links: { next: page.length < newestFirst.length ? `${base}/organisations/${ORG}/deliveries/letters?page[number]=2` : null },
+          meta: { total: newestFirst.length, per_page: limit, current_page: 1 },
+        });
       }
       if (req.method === 'POST') {
         const body = JSON.parse((await read()).toString() || '{}');

@@ -83,6 +83,46 @@ describe('the hygiene scan', () => {
     assert.match(out, /session\/credential file is tracked/);
   });
 
+  test('a path whose bytes are not valid UTF-8 is still scanned', () => {
+    // Reading the list NUL-separated stopped git escaping the name, but not the
+    // decoding: execFileSync reads git's raw bytes as UTF-8, so a Latin-1 file
+    // name out of a repository written on Linux still arrived with a
+    // replacement character in it, and every read then went looking for a name
+    // no file has ever had. Both throws were swallowed, the file was skipped
+    // without a word, and the summary counted it among the clean ones while an
+    // access key sat staged inside it.
+    const dir = repo({ 'readme.md': 'nothing of interest here\n' });
+    const git = gitIn(dir);
+    writeFileSync(join(dir, 'loose'), `key = ${AWS_KEY}\n`);
+    const sha = git('hash-object', '-w', join(dir, 'loose')).stdout.trim();
+    // Staged directly, because macOS will not create the file: APFS rejects a
+    // name that is not valid UTF-8 with EILSEQ. The index takes it regardless,
+    // and the index is what gets committed and pushed.
+    git('rm', '-q', '--cached', 'loose');
+    const entry = Buffer.concat([
+      Buffer.from(`100644 ${sha} 0\t`, 'latin1'),
+      Buffer.from([0x62, 0xfc, 0x63, 0x68, 0x65, 0x72, 0x2e, 0x74, 0x78, 0x74]),  // b<0xfc>cher.txt
+      Buffer.from([0]),
+    ]);
+    spawnSync('git', ['update-index', '-z', '--index-info'], { cwd: dir, env: GIT_ENV, input: entry });
+
+    const { code, out } = scan(dir);
+    assert.equal(code, 1, `a byte git cannot spell hid a credential from the scan:\n${out}`);
+    assert.match(out, /AWS access key/);
+  });
+
+  test('a finding names the line of the copy it is in', () => {
+    // Both copies used to be glued together and scanned as one string, so the
+    // line number was counted through the join: a key on line 4 of a four-line
+    // working copy was announced at line 45, which reads like a scanner that
+    // has lost its place and gets waved through as a false positive.
+    const dir = repo({ 'notes.txt': `${Array.from({ length: 40 }, (_, i) => `line ${i + 1} clean`).join('\n')}\n` });
+    writeFileSync(join(dir, 'notes.txt'), `one\ntwo\nthree\nkey = ${AWS_KEY}\n`);
+    const { code, out } = scan(dir);
+    assert.equal(code, 1, out);
+    assert.match(out, /notes\.txt[^:\n]*:4: AWS access key/, `pointed at a line the file does not reach:\n${out}`);
+  });
+
   test('scans the working tree during an unfinished merge, and quietly', () => {
     // A conflicted path is in the index at stages 1 to 3 and at no stage 0, so
     // `git show :path` refuses it — and execFileSync hands git's "fatal:"
