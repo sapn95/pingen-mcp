@@ -151,6 +151,49 @@ describe('nothing is mailed by accident', () => {
     assert.match(data.note, /action_required/);
   });
 
+  test('a create that comes back in a non-draft state is not reported as a draft', async () => {
+    // The note for the default path repeated the flag we sent: auto_send=false
+    // was answered with "DRAFT erstellt (nichts versandt). Zum Senden:
+    // pingen_submit_letter." whatever Pingen said had happened. That is the one
+    // wrong answer here that costs money twice over — a letter Pingen has
+    // already taken for printing, reported as still sitting there, with an
+    // instruction to go and post it. The auto_send=true half of the same note
+    // had been taught to read the status back a round earlier; this half had
+    // not, and it is the half almost every call takes.
+    mock.state.nextStatus = 'processing';
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf });
+    mock.state.nextStatus = null;
+    assert.equal(data.created.status, 'processing');
+    assert.doesNotMatch(data.note, /nichts versandt/, `claimed nothing was mailed: ${data.note}`);
+    assert.doesNotMatch(data.note, /Zum Senden/, `told the caller to post it a second time: ${data.note}`);
+    assert.match(data.note, /processing/, 'and it says what Pingen actually reported');
+  });
+
+  test('a status nobody here has heard of is not reported as a send', async () => {
+    // The status check was a denylist of three names, so every other answer —
+    // including one that plainly is not a send — came out as "→ wird versandt".
+    // What the tool knows is what Pingen told it, and about anything else it
+    // has to say so rather than guess in the direction of "it went".
+    mock.state.nextStatus = 'undeliverable';
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+    mock.state.nextStatus = null;
+    assert.doesNotMatch(data.note, /wird versandt/, `claimed a send off an unknown status: ${data.note}`);
+    assert.match(data.note, /undeliverable/);
+    assert.match(data.note, /pingen_get_letter/, 'and says where to go and look');
+  });
+
+  test('an answer carrying no status at all is not a send either', async () => {
+    // The worst of the three: with no status in the answer the note read
+    // `Status "unbekannt" → wird versandt`, which says in one breath that it
+    // does not know and that the letter is on its way.
+    mock.state.omitStatus = true;
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+    mock.state.omitStatus = false;
+    assert.equal(data.created.status, undefined, 'the fixture did answer without one');
+    assert.doesNotMatch(data.note, /wird versandt/, `claimed a send off no status at all: ${data.note}`);
+    assert.match(data.note, /pingen_get_letter/);
+  });
+
   test('a list limit cannot smuggle extra query parameters into the request', async () => {
     // The schema says number; nothing enforces it. A string went into the query
     // verbatim, so the caller could append parameters of their own choosing.
@@ -312,6 +355,48 @@ describe('credentials never leave the process', () => {
     assert.ok(isError, 'the failure is still reported');
     assert.ok(!raw.includes(stale), `a bearer its own request was still out with reached a tool result: ${raw}`);
     assert.match(raw, /\*\*\*/, 'it is masked, not merely absent');
+  });
+
+  test('a bearer is still known to the redactor when its own result is built', async () => {
+    // The pin lasted exactly as long as the HTTP request, under a note that
+    // said it lasted "until its answer has been turned into a result or a
+    // message — which is where redact() runs". It does not: redact() runs in
+    // the dispatcher, after api() has returned. For a failed request the gap is
+    // harmless, because the body is excerpted inside api() while the bearer is
+    // still pinned — which is why the loud-failure letter could never have
+    // shown this. A 200 is redacted on the way out instead, and by then the
+    // bearer had been released.
+    //
+    // Nine ordinary reads in flight at once is all it takes: nine is one more
+    // than the set will hold, so the moment the first one lets go of its bearer
+    // that bearer is the oldest forgettable thing in the set — dropped, while
+    // its own answer was still being turned into the result that quotes it.
+    const m = await start();
+    m.state.rotateTokens = true;
+    m.state.tokenTtl = 1;                  // near expiry on arrival: every call re-grants
+    let release;
+    m.state.holdEcho = new Promise(r => { release = r; });
+    const s = await startServer({ PINGEN_API_BASE: m.base });
+    // Started one at a time, so each call has finished granting before the next
+    // asks: fired together they would share one bearer and prove nothing.
+    const inflight = [];
+    for (let i = 1; i <= 9; i++) {
+      inflight.push(s.call('pingen_get_letter', { letter_id: `ltr-echo-${i}` }));
+      const deadline = Date.now() + 10000;
+      while (!m.state.calls.some(c => c.endsWith(`/ltr-echo-${i}`)) && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 5));
+      }
+    }
+    const [first] = m.state.issuedTokens;
+    release();
+    const results = await Promise.all(inflight);
+    const grants = m.state.issuedTokens.length;
+    await s.stop();
+    await m.close();
+    assert.ok(grants >= 9, `the fixture never got past the bound (${grants} grant(s))`);
+    const blob = results.map(r => r.raw).join('\n');
+    assert.ok(!blob.includes(first), `a bearer reached a tool result while its own call was being answered: ${blob}`);
+    assert.match(results[0].raw, /Bearer \*\*\*/, 'it is masked, not merely absent');
   });
 
   test('a rejected grant does not echo the client secret back, in any encoding', async () => {
