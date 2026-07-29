@@ -273,6 +273,16 @@ function orgId() {
 // the tracking trail: a caller that does not say how big a page it wants cannot
 // tell a full one from a short one. What the answer volunteers is better
 // evidence than that, so the count and the next link are read first.
+//
+// Asking is necessary and not sufficient, and it is worth writing down how far
+// it reaches: a page size is a request, and if the API hands back fewer than
+// this because it caps the page, then a full page never looks full and the last
+// branch below can never fire. It is the largest page pingen_list_letters
+// believes exists, so against this API the case does not arise; against one that
+// capped lower AND said nothing about a total, a first page would be read as the
+// whole list. That is undecidable from a single answer, and it cannot make the
+// billing guard stand down — any cap above one already leaves more than one
+// organisation on the page, which is the question discoverOrg asks.
 const ORG_PAGE = 100;
 async function listOrganisations() {
   const d = await api('GET', `/organisations?page[limit]=${ORG_PAGE}`);
@@ -379,6 +389,14 @@ function letterRow(d) {
 // what it is. Read the note below for what went wrong without them.
 const RESTING = new Set(['draft', 'valid', 'action_required', 'invalid']);
 const MOVING = new Set(['processing', 'sending', 'sent', 'delivered']);
+
+// Two of the four resting statuses do not mean "waiting to be sent", they mean
+// "waiting to be fixed": Pingen has looked at the PDF and will not take it —
+// the address could not be read out of the window, or the franking zone is
+// covered. The README devotes a whole section to that case because it is the
+// one everybody hits, and it says in as many words that such a letter cannot be
+// submitted. The create note said the opposite. See the note at the branch.
+const BLOCKED = new Set(['action_required', 'invalid']);
 
 // How much of a tracking trail to ask for in one go. A letter's history is a
 // handful of entries, so this is far more than any real one has — which is the
@@ -536,14 +554,29 @@ const callTool = async req => {
       // this version predates and every ordinary draft creation starts answering
       // "NICHT mit pingen_submit_letter nachfassen" — which is the whole flow of
       // this server, talked out of itself by a guess.
+      //
+      // And the resting half was still one sentence for four statuses. Two of
+      // them are Pingen saying it has read the PDF and will not take it —
+      // action_required, invalid — and both of those were answered with "DRAFT
+      // erstellt (nichts versandt). Zum Senden: pingen_submit_letter.", which
+      // is this server telling the caller to post a letter its own README says
+      // cannot be posted, in the single most common failure there is: the
+      // address did not sit in the window. It was also the one branch of the
+      // six that never repeated what Pingen had answered, so the sentence a
+      // reader actually reads said "ready" while the status three lines above
+      // it said "not ready". The sibling half has said "NICHT versandt.
+      // Details: pingen_get_letter." about those same two statuses since round
+      // 15; this half was never given it.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
       const note = !attributes.auto_send
-        ? RESTING.has(status)
-          ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
-          : MOVING.has(status)
-            ? `auto_send=false, aber Pingen meldet Status "${shown}" — der Brief ist bereits zum Druck angenommen. NICHT mit pingen_submit_letter nachfassen, sonst geht er zweimal raus. Prüfen: pingen_get_letter.`
-            : `auto_send=false, und Pingen meldet Status "${shown}" — den kennt dieser Server nicht; ob der Brief ein Entwurf ist oder schon läuft, sagt das nicht. Erst pingen_get_letter, dann entscheiden, ob pingen_submit_letter nötig ist — blind nachfassen kann ihn zweimal rausschicken.`
+        ? BLOCKED.has(status)
+          ? `Entwurf erstellt, nichts versandt — aber Pingen meldet Status "${shown}" und nimmt den Brief so nicht zum Druck an. Ursache prüfen: pingen_get_letter oder das Dashboard (bei action_required meist Adressfenster oder Frankierzone im PDF), dann ein korrigiertes PDF hochladen. pingen_submit_letter bringt ihn in diesem Zustand nicht auf den Weg.`
+          : RESTING.has(status)
+            ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
+            : MOVING.has(status)
+              ? `auto_send=false, aber Pingen meldet Status "${shown}" — der Brief ist bereits zum Druck angenommen. NICHT mit pingen_submit_letter nachfassen, sonst geht er zweimal raus. Prüfen: pingen_get_letter.`
+              : `auto_send=false, und Pingen meldet Status "${shown}" — den kennt dieser Server nicht; ob der Brief ein Entwurf ist oder schon läuft, sagt das nicht. Erst pingen_get_letter, dann entscheiden, ob pingen_submit_letter nötig ist — blind nachfassen kann ihn zweimal rausschicken.`
         : RESTING.has(status)
           ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt. Details: pingen_get_letter.`
           : MOVING.has(status)
@@ -583,14 +616,27 @@ const callTool = async req => {
       // Same two lists as the create path, and the same rule: a status in
       // neither of them, or none at all, is reported as not knowing rather than
       // as a send.
+      //
+      // The note was given that rule and the key beside it was not, which is
+      // odd, because the key is what the diagnosis above had named: the answer
+      // came back "under a key that reads as a receipt". It still did. A letter
+      // Pingen had left sitting in action_required was handed over as
+      // {"submitted": {…}} with a note underneath saying it was NICHT unterwegs
+      // — the same one-breath contradiction this pair of tools has now been
+      // taken apart for three rounds running, and the half that a skim reads is
+      // the key, not the sentence. So the receipt is issued only when Pingen
+      // says it took the letter; otherwise the letter still comes back, under a
+      // name that claims nothing either way, and the note says what is known.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
-      const note = MOVING.has(status)
+      const accepted = MOVING.has(status);
+      const note = accepted
         ? `Pingen meldet Status "${shown}" — zum Druck angenommen, der Brief geht raus.`
         : RESTING.has(status)
           ? `Pingen meldet Status "${shown}" — der Brief liegt weiterhin bei Pingen und ist NICHT unterwegs. Ursache prüfen: pingen_get_letter, danach erneut senden.`
           : `Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter, und nicht blind ein zweites Mal senden.`;
-      return text({ submitted: letterRow(d.data), note });
+      const row = letterRow(d.data);
+      return text({ ...(accepted ? { submitted: row } : { letter: row }), note });
     }
     if (name === 'pingen_cancel_letter') {
       await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/cancel`, { json: { data: { id: lid, type: 'letters' } } });

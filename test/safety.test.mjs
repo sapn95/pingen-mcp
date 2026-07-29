@@ -207,6 +207,45 @@ describe('nothing is mailed by accident', () => {
     }
   });
 
+  test('a draft Pingen has flagged is not announced as ready to send', async () => {
+    // Four statuses shared one sentence. Two of them are Pingen saying it has
+    // read the PDF and will not take it — the address was not in the window,
+    // the franking zone is covered — and the README has a whole section about
+    // that case, ending in "the letter can't be submitted". The note said
+    // "DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.":
+    // this server telling the caller to post a letter it documents as
+    // unpostable, in the one failure everybody hits. It was also the only one
+    // of the six branches that never repeated what Pingen had answered, so the
+    // sentence a reader reads said ready while the row above it said otherwise
+    // — and what gets reported back to a human is "draft created, ready to
+    // go", which is how a PDF nobody looked at again ends up believed correct.
+    for (const st of ['action_required', 'invalid']) {
+      mock.state.nextStatus = st;
+      const { data } = await srv.call('pingen_send_letter', { file_path: pdf });
+      mock.state.nextStatus = null;
+      assert.equal(data.created.status, st, 'the fixture did answer with it');
+      assert.doesNotMatch(data.note, /Zum Senden: pingen_submit_letter/,
+        `${st}: told the caller to post a letter Pingen had just refused: ${data.note}`);
+      assert.match(data.note, new RegExp(st), `${st}: the note never said what Pingen answered: ${data.note}`);
+      assert.match(data.note, /pingen_get_letter/, `${st}: and did not say where to look`);
+      assert.equal(mock.state.submitted.length, 0, `${st}: something was submitted`);
+    }
+  });
+
+  test('a draft Pingen is happy with still says to go ahead and send it', async () => {
+    // The other half, and the one that must not become collateral: the whole
+    // two-step flow of this server is "create a draft, then submit it". A
+    // warning on every creation would be noise, and noise is how the real one
+    // gets read past — the same reasoning that split the unknown branch off.
+    for (const st of ['draft', 'valid']) {
+      mock.state.nextStatus = st;
+      const { data } = await srv.call('pingen_send_letter', { file_path: pdf });
+      mock.state.nextStatus = null;
+      assert.equal(data.created.status, st);
+      assert.match(data.note, /Zum Senden: pingen_submit_letter/, `${st}: the ordinary path stopped saying what to do next: ${data.note}`);
+    }
+  });
+
   test('an answer carrying no status at all is not a send either', async () => {
     // The worst of the three: with no status in the answer the note read
     // `Status "unbekannt" → wird versandt`, which says in one breath that it
@@ -316,9 +355,33 @@ describe('nothing is mailed by accident', () => {
     mock.state.omitSendStatus = true;
     const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
     mock.state.omitSendStatus = false;
-    assert.equal(data.submitted.status, undefined, 'the fixture did answer without one');
+    assert.equal(data.letter.status, undefined, 'the fixture did answer without one');
     assert.doesNotMatch(data.note, /geht raus/, `claimed a send off no status at all: ${JSON.stringify(data)}`);
     assert.match(data.note, /pingen_get_letter/);
+  });
+
+  test('a letter Pingen did not take does not come back under a receipt', async () => {
+    // The note was taught to read the status back and the key beside it was
+    // not — although the key is exactly what the diagnosis had named: the
+    // answer came back "under a key that reads as a receipt", and it still
+    // did. {"submitted": {…}} with a note underneath saying NICHT unterwegs is
+    // the same one-breath contradiction this pair of tools has been taken
+    // apart for three rounds running, and of the two halves the key is the one
+    // a skim keeps. A model reporting "letter submitted" off it is right about
+    // the field name and wrong about the post, in the direction where nobody
+    // ever goes looking, because there is no bill and no tracking number to
+    // miss.
+    for (const [how, set, unset] of [
+      ['left in action_required', () => { mock.state.sendStatus = 'action_required'; }, () => { mock.state.sendStatus = null; }],
+      ['answered with a status nobody here knows', () => { mock.state.sendStatus = 'quarantined'; }, () => { mock.state.sendStatus = null; }],
+      ['answered with no status at all', () => { mock.state.omitSendStatus = true; }, () => { mock.state.omitSendStatus = false; }],
+    ]) {
+      set();
+      const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+      unset();
+      assert.equal(data.submitted, undefined, `${how}: filed under a receipt anyway: ${JSON.stringify(data)}`);
+      assert.equal(data.letter.id, 'ltr-2', `${how}: and then did not hand the letter over at all: ${JSON.stringify(data)}`);
+    }
   });
 
   test('a submission Pingen did take is reported as one', async () => {
@@ -326,7 +389,7 @@ describe('nothing is mailed by accident', () => {
     // taken for printing has to read as a send, or the note becomes noise and
     // noise is how a real warning gets read past.
     const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
-    assert.equal(data.submitted.status, 'processing');
+    assert.equal(data.submitted.status, 'processing', `the earned receipt went missing: ${JSON.stringify(data)}`);
     assert.match(data.note, /geht raus/, `a genuine send was hedged: ${JSON.stringify(data)}`);
   });
 
