@@ -143,6 +143,25 @@ describe('reading', () => {
     assert.ok(mock.state.urls.some(u => u.includes('page[limit]=3')), 'limit is passed through');
   });
 
+  test('one page of letters is not the whole list, and says so', async () => {
+    // pingen_letter_events was taught this and pingen_list_letters was not, so
+    // an account with more letters than the page size got the newest few back
+    // as though they were all of them — and "no, nothing went to that address"
+    // then came out of a list nobody had read to the end.
+    const { data } = await srv.call('pingen_list_letters', { limit: 2 });
+    assert.equal(data.letters.length, 2);
+    assert.equal(data.truncated, true, `handed back ${data.letters.length} of ${mock.state.letters.length} without a word`);
+    assert.match(data.hint, /limit/);
+  });
+
+  test('a list that does fit is not announced as truncated', async () => {
+    // The other half of it: a warning on every complete answer is noise, and
+    // noise is how a real one gets read past.
+    const { data } = await srv.call('pingen_list_letters', { limit: 100 });
+    assert.equal(data.letters.length, mock.state.letters.length);
+    assert.equal(data.truncated, undefined, 'cried wolf over a complete list');
+  });
+
   test('reads the tracking history', async () => {
     const { data } = await srv.call('pingen_letter_events', { letter_id: 'ltr-1' });
     assert.equal(data.events.length, 2);

@@ -323,13 +323,33 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       // a parameter of the caller's choosing to a request built here.
       const limit = Math.min(100, Math.max(1, Math.trunc(Number(args.limit)) || 20));
       const d = await api('GET', `/organisations/${await oid()}/deliveries/letters?page[limit]=${limit}&sort=-created_at`);
-      return text({ letters: (d.data || []).map(letterRow) });
+      const letters = (d.data || []).map(letterRow);
+      // The same page-is-not-the-whole-thing that pingen_letter_events was
+      // taught about, left standing in the tool anyone actually asks "did that
+      // letter go out?". An account with more letters than the page size got
+      // the newest twenty back with nothing to say they were only the newest
+      // twenty, so "no, there is nothing to that address" came out of a list
+      // that had never been read to the end — an answer, not a failure, and
+      // wrong. Pingen says how many there are; when it says nothing, a page
+      // that came back exactly full is the one piece of evidence left.
+      const more = d.links?.next ? true
+        : d.meta?.total != null ? d.meta.total > letters.length
+          : letters.length >= limit;
+      return text({ letters, ...(more ? { truncated: true, hint: `nur die neuesten ${letters.length} — Pingen hat weitere; limit erhöhen (max 100)` } : {}) });
     }
     if (name === 'pingen_get_letter') {
       const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}`);
       return text(letterRow(d.data));
     }
     if (name === 'pingen_send_letter') {
+      // Which account this letter belongs to is settled before its contents
+      // leave the machine. Resolving the organisation lazily at the POST meant
+      // an account with several of them uploaded the PDF into Pingen's storage
+      // first and refused to choose only afterwards — and that refusal exists
+      // precisely so a private letter does not land at an account nobody
+      // picked. Reading the file still happens after, so a wrong path costs no
+      // more than one cached lookup.
+      const org = await oid();
       const { file_url, file_url_signature } = await uploadFile(args.file_path);
       const attributes = {
         file_original_name: basename(args.file_path),
@@ -338,7 +358,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
         auto_send: args.auto_send === true,
       };
       if (args.delivery_product) attributes.delivery_product = args.delivery_product;
-      const d = await api('POST', `/organisations/${await oid()}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
+      const d = await api('POST', `/organisations/${org}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
       // The note used to repeat the flag we sent. Pingen can answer
       // `action_required` — a letter it will not send until something is fixed
       // — and the tool said "wird versandt" about it anyway.

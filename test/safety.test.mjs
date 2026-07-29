@@ -112,6 +112,28 @@ describe('nothing is mailed by accident', () => {
     assert.equal(calls.length, 0, `it called out anyway: ${calls}`);
   });
 
+  test('an unanswerable "which organisation" refuses before the PDF leaves the machine', async () => {
+    // The refusal exists so that no letter is franked at an account nobody
+    // chose. Resolving the organisation lazily at the POST meant the bytes were
+    // already in Pingen's storage by the time the question was asked: a private
+    // letter uploaded to an account the server had just declined to pick.
+    const two = await start();
+    two.state.orgs = [
+      { id: 'org-a', type: 'organisations', attributes: { name: 'Example One' } },
+      { id: 'org-b', type: 'organisations', attributes: { name: 'Example Two' } },
+    ];
+    const s = await startServer({ PINGEN_API_BASE: two.base, PINGEN_ORG_UUID: '' });
+    const { raw, isError } = await s.call('pingen_send_letter', { file_path: pdf });
+    const uploads = two.state.uploads.length;
+    const calls = [...two.state.calls];
+    await s.stop();
+    await two.close();
+    assert.ok(isError);
+    assert.match(raw, /PINGEN_ORG_UUID/);
+    assert.equal(uploads, 0, `the letter was uploaded anyway: ${calls}`);
+    assert.ok(!calls.includes('GET /file-upload'), `it asked for an upload slot first: ${calls}`);
+  });
+
   test('deleting without confirm removes nothing', async () => {
     const { data } = await srv.call('pingen_delete_letter', { letter_id: 'ltr-3' });
     assert.match(data.refused, /confirm:true/);
