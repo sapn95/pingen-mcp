@@ -21,6 +21,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { readFileSync, statSync, openSync, writeSync, fchmodSync, closeSync, constants } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 // Name and version come from package.json, never from a second copy here:
 // `npm version` only bumps package.json, so a hardcoded string silently
@@ -120,9 +121,9 @@ let token = null, tokenExp = 0, pendingToken = null;
 // how long the request takes.
 //
 // So what is still out is pinned, and only what is not can be forgotten. The
-// set is bounded by eight plus however many requests are genuinely in flight,
-// which is bounded by the client, and every bearer that can still come back
-// quoted is in it.
+// set is bounded by eight plus however many bearers the tool calls in flight
+// have used, which is bounded by the client, and every bearer that can still
+// come back quoted is in it.
 const tokensHeld = new Set();
 const tokensOut = new Map();
 function rememberToken(t) { tokensHeld.add(t); forgetSpent(); }
@@ -133,14 +134,40 @@ function forgetSpent() {
     tokensHeld.delete(t);
   }
 }
-// Held from the moment a request is given a bearer until its answer has been
-// turned into a result or a message — which is where redact() runs — and not a
-// moment less.
 function holdToken(t) { tokensOut.set(t, (tokensOut.get(t) ?? 0) + 1); }
 function releaseToken(t) {
   const n = (tokensOut.get(t) ?? 0) - 1;
   if (n > 0) tokensOut.set(t, n); else tokensOut.delete(t);
   forgetSpent();
+}
+
+// The pin used to last exactly as long as the HTTP request, and the note above
+// it claimed that was "until its answer has been turned into a result or a
+// message — which is where redact() runs". It is not: redact() runs in the
+// dispatcher, after api() has returned. For most calls that gap is harmless
+// because the body is already read and already excerpted by then, but the
+// download hands its response back unread — fetch resolves on the headers — so
+// the bearer was unpinned before a single byte of the answer had arrived. A
+// dozen grants while the body was still on the way, and the token that answer
+// was about to quote was the first one dropped; it reached the tool result
+// verbatim, still valid. The same gap opens for any call once more than eight
+// bearers are pinned, because then the one just released is the oldest
+// forgettable thing in the set at the instant its own result is being built.
+//
+// So the interval that holds is the tool call, which is the one that ends at
+// redact(). Each call collects the bearers it used and lets go of all of them
+// at the end; the request is a strict sub-interval of that, so it no longer
+// needs a pin of its own.
+const callBearers = new AsyncLocalStorage();
+function pinForCall(t) {
+  const used = callBearers.getStore();
+  // No scope means nobody would ever unpin it, and a bearer pinned for ever is
+  // a set that grows for ever — exactly what the bound exists to prevent. Every
+  // path that reaches here today runs inside a tool call; one that did not
+  // would go unpinned rather than uncollectable.
+  if (!used || used.has(t)) return;
+  used.add(t);
+  holdToken(t);
 }
 
 // A tool result is handed straight to the model, and an upstream error body can
@@ -206,34 +233,27 @@ function letterId(v) {
 
 async function api(method, path, { json, raw, retry = true } = {}) {
   const bearer = await accessToken();
+  // This is the bearer that can come back quoted, so it stays known to the
+  // redactor until the tool call that used it has been answered — see
+  // pinForCall. Pinning it for the length of the request was not enough.
+  pinForCall(bearer);
   const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.api+json' };
   let bodyInit;
   if (json !== undefined) { headers['Content-Type'] = 'application/vnd.api+json'; bodyInit = JSON.stringify(json); }
-  // This is the bearer that can come back quoted, so it stays known to the
-  // redactor for exactly as long as the request is out. The release is in a
-  // finally and the masking is in the message that is thrown, so the error is
-  // built while the token is still pinned.
-  holdToken(bearer);
-  try {
-    const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
-    // A 401 means the request was refused before it did anything, so retrying it
-    // once with a fresh token is safe even for a mutation — and it is the
-    // difference between a revoked token costing one call and costing every call
-    // until the process restarts.
-    if (r.status === 401 && retry) {
-      token = null; tokenExp = 0;
-      // Awaited rather than handed back: `return promise` inside a try runs the
-      // finally as soon as the promise exists, which would unpin this bearer
-      // while the retry is still travelling with the next one.
-      return await api(method, path, { json, raw, retry: false });
-    }
-    if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
-    if (raw) return r;
-    const txt = await r.text();
-    return txt ? JSON.parse(txt) : {};
-  } finally {
-    releaseToken(bearer);
+  const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
+  // A 401 means the request was refused before it did anything, so retrying it
+  // once with a fresh token is safe even for a mutation — and it is the
+  // difference between a revoked token costing one call and costing every call
+  // until the process restarts. Awaited rather than handed back so that a stack
+  // trace still names this frame.
+  if (r.status === 401 && retry) {
+    token = null; tokenExp = 0;
+    return await api(method, path, { json, raw, retry: false });
   }
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
+  if (raw) return r;
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : {};
 }
 
 // Discovered once and remembered, and — like the token — looked up only once
@@ -327,6 +347,14 @@ function letterRow(d) {
   return { id: d?.id, status: a.status, delivery_product: a.delivery_product, recipient: a.address, tracking: a.tracking_number, pages: a.file_pages, submitted: a.submitted_at, price: (a.price_value != null && a.price_currency) ? `${a.price_value} ${a.price_currency}` : undefined };
 }
 
+// The statuses that say a letter is still sitting with Pingen and nothing has
+// been printed, and the ones that say it has been taken for printing. Two named
+// lists rather than one, because everything else — a status this version has
+// never heard of, or none at all — belongs in neither and has to be reported as
+// what it is. Read the note below for what went wrong without them.
+const RESTING = new Set(['draft', 'valid', 'action_required', 'invalid']);
+const MOVING = new Set(['processing', 'sending', 'sent', 'delivered']);
+
 const TOOLS = [
   { name: 'pingen_status', description: 'Verify credentials and show the active Pingen organisation (name, plan, id).', inputSchema: { type: 'object', properties: {} } },
   { name: 'pingen_list_letters', description: 'List letters with status and tracking. Optional page size.', inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'page size (default 20)' } } } },
@@ -347,7 +375,7 @@ const TOOLS = [
 const server = new Server({ name: PKG.name, version: PKG.version }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async req => {
+const callTool = async req => {
   const { name, arguments: args = {} } = req.params;
   const text = s => ({ content: [{ type: 'text', text: redact(typeof s === 'string' ? s : JSON.stringify(s, null, 1)) }] });
   try {
@@ -429,15 +457,30 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       };
       if (args.delivery_product) attributes.delivery_product = args.delivery_product;
       const d = await api('POST', `/organisations/${org}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
-      // The note used to repeat the flag we sent. Pingen can answer
-      // `action_required` — a letter it will not send until something is fixed
-      // — and the tool said "wird versandt" about it anyway.
+      // The note used to repeat the flag we sent, and half of it still did. The
+      // auto_send=true half was taught to read Pingen's status back, but as a
+      // denylist of three names: every other answer — a status this code had
+      // never heard of, or an answer carrying none, which came out as
+      // "Status \"unbekannt\" → wird versandt" — was a claim about the physical
+      // post made from ignorance. The auto_send=false half read nothing at all,
+      // and that is the more expensive one: Pingen answering anything other
+      // than a draft state was still reported as "nichts versandt, zum Senden
+      // pingen_submit_letter", which is an instruction to put the same letter
+      // in the post a second time, at cost and with no undo.
+      //
+      // So both halves are decided by the status that came back, and a status
+      // in neither list is reported as unknown rather than guessed at.
       const status = d.data?.attributes?.status;
+      const shown = status ?? 'keinen';
       const note = !attributes.auto_send
-        ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
-        : status === 'draft' || status === 'action_required' || status === 'invalid'
-          ? `auto_send=true, aber Pingen meldet Status "${status}" — NICHT versandt. Details: pingen_get_letter.`
-          : `auto_send=true, Pingen meldet Status "${status ?? 'unbekannt'}" → wird versandt.`;
+        ? RESTING.has(status)
+          ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
+          : `auto_send=false, aber Pingen meldet Status "${shown}" — das ist kein Entwurfszustand. NICHT mit pingen_submit_letter nachfassen, sonst geht der Brief womöglich zweimal raus. Prüfen: pingen_get_letter.`
+        : RESTING.has(status)
+          ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt. Details: pingen_get_letter.`
+          : MOVING.has(status)
+            ? `auto_send=true, Pingen meldet Status "${shown}" → wird versandt.`
+            : `auto_send=true, Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter.`;
       return text({ created: letterRow(d.data), note });
     }
     if (name === 'pingen_submit_letter') {
@@ -521,6 +564,19 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
     throw new Error(`unknown tool ${name}`);
   } catch (e) {
     return { content: [{ type: 'text', text: redact('ERROR: ' + (e.message || String(e))) }], isError: true };
+  }
+};
+
+// Wrapped rather than registered directly: the redact() calls inside callTool
+// are the last thing that happens to a string before it leaves this process, so
+// every bearer the call reached for has to still be known to the redactor when
+// they run. Releasing here, and only here, is what makes that true.
+server.setRequestHandler(CallToolRequestSchema, async req => {
+  const used = new Set();
+  try {
+    return await callBearers.run(used, () => callTool(req));
+  } finally {
+    for (const b of used) releaseToken(b);
   }
 });
 

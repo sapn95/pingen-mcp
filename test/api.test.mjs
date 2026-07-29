@@ -185,11 +185,19 @@ describe('reading', () => {
     assert.match(data.hint, /pingen_get_letter/, 'and says what is left to do instead');
   });
 
-  test('reads the tracking history', async () => {
+  test('reads the tracking history, newest first', async () => {
+    // Newest first is not cosmetic here: the tool reads one page and stops, so
+    // the sort decides whether that page is the end of the history or the
+    // beginning of it. Asked the other way round, a letter that has been
+    // delivered comes back looking like one that has only just been created —
+    // and the assertion used to expect exactly that order, because the mock
+    // handed these over in insertion order whatever the query said.
     const { data } = await srv.call('pingen_letter_events', { letter_id: 'ltr-1' });
     assert.equal(data.events.length, 2);
-    assert.equal(data.events[0].type, 'letter.created');
-    assert.equal(data.events[0].at, '2026-07-01T09:00:00+00:00');
+    assert.equal(data.events[0].type, 'letter.sent', `oldest first: ${data.events.map(e => e.type)}`);
+    assert.equal(data.events[0].at, '2026-07-01T09:30:00+00:00');
+    assert.equal(data.events[1].type, 'letter.created');
+    assert.ok(mock.state.urls.some(u => u.includes('/events?') && u.includes('sort=-emitted_at')), 'the sort was asked for');
   });
 
   test('an unknown letter surfaces the upstream 404', async () => {

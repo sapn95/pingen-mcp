@@ -39,6 +39,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     authHeaders: [],      // every Authorization header the API saw
     tokenGrants: 0,
     nextStatus: null,      // force the next created letter's status
+    // Some answers carry no status at all, and `nextStatus` cannot express that
+    // — it is or-ed against the default. The tool's worst wrong answer used to
+    // be exactly this case: "Status "unbekannt" → wird versandt", a claim about
+    // the physical post made out of an answer that said nothing.
+    omitStatus: false,
     uploads: [],          // { slot, bytes }
     created: [],          // attributes of every POSTed letter
     submitted: [],        // { id, attributes } of every PATCH .../send
@@ -61,6 +66,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // Set to a promise to hold the letter that fails loudly open, so a second
     // call can overtake it while its response is still on the way back.
     holdLeak: null,
+    // The same trick for an answer that *succeeds*. It matters that this one is
+    // separate: the loud failure's body is excerpted while the request is still
+    // inside api(), so it can only ever show half the question. What a 200 that
+    // quotes the bearer does is decided later, in the dispatcher, once the
+    // request is over — which is where the redactor has to still know the token.
+    holdEcho: null,
     orgs: [{ id: ORG, type: 'organisations', attributes: { name: 'Test Org', plan: 'free', status: 'active' } }],
     letters: [
       // Deliberately out of order in the array: the API is asked for
@@ -180,16 +191,29 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         state.created.push(attributes);
         const created = letter(`ltr-new-${state.created.length}`, {
           ...attributes,
-          // Pingen can accept a letter and still refuse to send it. A test sets
-          // state.nextStatus to make it answer that way once.
+          // Pingen can accept a letter and still refuse to send it — and it can
+          // accept one we asked to keep as a draft and take it for printing
+          // anyway. A test sets state.nextStatus to make it answer either way.
           status: state.nextStatus || (attributes.auto_send ? 'processing' : 'draft'),
           tracking_number: null,
           submitted_at: attributes.auto_send ? '2026-07-27T10:00:00+00:00' : null,
         });
+        if (state.omitStatus) delete created.attributes.status;
         state.letters.push(created);
         return send(201, { data: created });
       }
       return send(405, { error: 'method_not_allowed' });
+    }
+
+    // Letters that exist only to be answered with, held open when a test asks
+    // for it. Deliberately not in state.letters: a test needs as many of them
+    // at once as it likes, and the list every other test reads must not grow
+    // with them. Below the collection route on purpose — up there `id` is
+    // undefined for POST /letters, and reading it as a string there wedged
+    // every send_letter call in the suite behind a reply that never came.
+    if (id.startsWith('ltr-echo')) {
+      if (state.holdEcho) await state.holdEcho;
+      return send(200, { data: { id, type: 'letters', attributes: { status: 'sent', address: `echo ${req.headers.authorization}` } } });
     }
 
     const known = state.letters.find(l => l.id === id);
@@ -218,10 +242,20 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       return send(204, '');
     }
     if (tail === 'events' && req.method === 'GET') {
-      return send(200, { data: [
+      // The same rule the collection endpoint above is held to, and for a
+      // sharper reason: the tool reads one page and one page only, so the sort
+      // decides whether that page is the end of the history or the beginning of
+      // it. Asked oldest-first — or not asked at all — a letter that has been
+      // delivered comes back looking like one that has only just been created.
+      // The mock used to hand these two over in insertion order whatever the
+      // query said, so that regression could not have been seen here.
+      const sort = url.searchParams.get('sort');
+      if (sort !== '-emitted_at') return send(400, { error: 'unsupported_sort', got: sort });
+      const evs = [
         { id: 'ev-1', type: 'letter_events', attributes: { type: 'letter.created', emitted_at: '2026-07-01T09:00:00+00:00', data: { by: 'api' } } },
         { id: 'ev-2', type: 'letter_events', attributes: { type: 'letter.sent', emitted_at: '2026-07-01T09:30:00+00:00', data: null } },
-      ] });
+      ];
+      return send(200, { data: evs.sort((a, b) => b.attributes.emitted_at.localeCompare(a.attributes.emitted_at)) });
     }
     if (tail === 'file' && req.method === 'GET') {
       // Three shapes the API is known to answer with, all of which the tool
