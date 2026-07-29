@@ -94,6 +94,60 @@ describe('authentication', () => {
     await two.close();
   });
 
+  test('a page of one organisation is not an account with one organisation', async () => {
+    // The guard above only ever asked "how many came back", and a collection
+    // that paginates answers that question about the page, not the account.
+    // Three organisations behind a page size of one look exactly like one
+    // organisation — so the guard stood down, the first entry of an
+    // alphabetical page became the account the letter was billed to, and
+    // nothing was said about it. This is the same page-is-not-the-list lesson
+    // both letter listings were taught, in the one place where getting it wrong
+    // decides who pays.
+    const many = await start();
+    // The first entry is a working organisation on purpose: pointed at one the
+    // mock refuses, the wrong choice would fail on its own and look like the
+    // guard had held. It has to succeed for the harm to be visible — a private
+    // letter uploaded, created and billed to an account nobody picked.
+    many.state.orgs = [
+      { id: ORG, type: 'organisations', attributes: { name: 'Example One' } },
+      { id: 'org-b', type: 'organisations', attributes: { name: 'Example Two' } },
+      { id: 'org-c', type: 'organisations', attributes: { name: 'Example Three' } },
+    ];
+    many.state.orgPageMax = 1;                      // the API caps the page, whatever we ask
+    const s = await startServer({ PINGEN_API_BASE: many.base, PINGEN_ORG_UUID: '' });
+    const { raw, isError } = await s.call('pingen_send_letter', { file_path: pdf });
+    const created = many.state.created.length;
+    const uploads = many.state.uploads.length;
+    await s.stop();
+    await many.close();
+    assert.equal(created, 0, 'a letter was created and billed to an account nobody picked');
+    assert.equal(uploads, 0, 'its contents were uploaded to an account nobody picked');
+    assert.ok(isError, 'it chose one off a page it knew was cut off');
+    assert.match(raw, /PINGEN_ORG_UUID/, `it did not say how to answer the question: ${raw}`);
+  });
+
+  test('an organisation on a later page is not a broken configuration', async () => {
+    // The mirror image, in pingen_status: absent from the page it read is not
+    // absent from the account. A correct PINGEN_ORG_UUID that happened to sort
+    // onto page two came back as "gehört zu keiner erreichbaren Organisation" —
+    // a confident, false answer that sends the reader off to fix a setting that
+    // was never broken.
+    const many = await start();
+    many.state.orgs = [
+      { id: 'org-a', type: 'organisations', attributes: { name: 'Example One' } },
+      { id: 'org-b', type: 'organisations', attributes: { name: 'Example Two' } },
+      { id: 'org-c', type: 'organisations', attributes: { name: 'Example Three' } },
+    ];
+    many.state.orgPageMax = 1;
+    const s = await startServer({ PINGEN_API_BASE: many.base, PINGEN_ORG_UUID: 'org-c' });
+    const { data } = await s.call('pingen_status');
+    await s.stop();
+    await many.close();
+    assert.equal(data.active, 'org-c', `declared a working configuration broken: ${JSON.stringify(data)}`);
+    assert.equal(data.error, undefined, `and reported it as an error: ${data.error}`);
+    assert.equal(data.truncated, true, 'while still saying the list was only a page');
+  });
+
   test('an account without organisations says so instead of guessing', async () => {
     const bare = await start();
     bare.state.orgs = [];
@@ -198,6 +252,48 @@ describe('reading', () => {
     assert.equal(data.events[0].at, '2026-07-01T09:30:00+00:00');
     assert.equal(data.events[1].type, 'letter.created');
     assert.ok(mock.state.urls.some(u => u.includes('/events?') && u.includes('sort=-emitted_at')), 'the sort was asked for');
+    assert.equal(data.truncated, undefined, 'cried wolf over a complete history');
+  });
+
+  test('a history page that volunteers nothing about the rest is still not the whole history', async () => {
+    // This tool was the first one taught that a page is not the list, and then
+    // pingen_list_letters was taught the same lesson better: when the answer
+    // carries neither a next link nor a total, a page that came back exactly
+    // full is the last evidence there is that something was cut off. That third
+    // branch was never brought back here — and could not have been, because a
+    // caller that never says how big a page it wants cannot tell a full one
+    // from a short one. A letter with a long trail then came back looking like
+    // one whose story had simply ended, which is the answer "no, it never went
+    // anywhere" is read off.
+    const many = await start();
+    many.state.eventTrail = Array.from({ length: 150 }, (_, i) => ({
+      id: `ev-${String(i).padStart(3, '0')}`,
+      type: 'letter_events',
+      attributes: { type: 'letter.status', emitted_at: `2026-01-01T00:${String(i % 60).padStart(2, '0')}:00+00:00` },
+    }));
+    many.state.eventsQuiet = true;
+    const s = await startServer({ PINGEN_API_BASE: many.base });
+    const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
+    const asked = many.state.urls.filter(u => u.includes('/events')).at(-1);
+    await s.stop();
+    await many.close();
+    assert.match(asked, /page%5Blimit%5D=100|page\[limit\]=100/, `it never said how big a page it wanted: ${asked}`);
+    assert.equal(data.events.length, 100);
+    assert.equal(data.truncated, true, `handed back ${data.events.length} of 150 without a word`);
+    assert.match(data.hint, /ältesten/, 'newest-first means it is the old end that is missing');
+  });
+
+  test('a short history with no metadata is not announced as truncated', async () => {
+    // The other half: a warning on every complete answer is noise, and noise is
+    // how a real one gets read past.
+    const few = await start();
+    few.state.eventsQuiet = true;
+    const s = await startServer({ PINGEN_API_BASE: few.base });
+    const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
+    await s.stop();
+    await few.close();
+    assert.equal(data.events.length, 2);
+    assert.equal(data.truncated, undefined, 'cried wolf over a complete history');
   });
 
   test('an unknown letter surfaces the upstream 404', async () => {

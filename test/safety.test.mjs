@@ -182,6 +182,31 @@ describe('nothing is mailed by accident', () => {
     assert.match(data.note, /pingen_get_letter/, 'and says where to go and look');
   });
 
+  test('a status nobody here has heard of is not called "not a draft" either', async () => {
+    // The auto_send=true half was split three ways and the auto_send=false half
+    // was left with two, so everything that was not a resting state came back as
+    // "das ist kein Entwurfszustand" — a positive claim about a status this code
+    // has never seen. For an answer with no status at all it was the same
+    // sentence the round before had been written to delete, only pointing the
+    // other way: it does not know, and it says it knows.
+    //
+    // And the cost is the ordinary case, not the exotic one. Pingen adds one
+    // pre-print state this version predates and every single draft creation
+    // starts telling the caller not to submit — which is the whole flow of this
+    // server, argued out of itself by a guess.
+    for (const [how, set, unset] of [
+      ['a status this version predates', () => { mock.state.nextStatus = 'pending'; }, () => { mock.state.nextStatus = null; }],
+      ['no status at all', () => { mock.state.omitStatus = true; }, () => { mock.state.omitStatus = false; }],
+    ]) {
+      set();
+      const { data } = await srv.call('pingen_send_letter', { file_path: pdf });
+      unset();
+      assert.doesNotMatch(data.note, /kein Entwurfszustand/, `${how}: claimed to know it is not a draft: ${data.note}`);
+      assert.match(data.note, /kennt dieser Server nicht/, `${how}: it did not say it does not know: ${data.note}`);
+      assert.match(data.note, /pingen_get_letter/, `${how}: and it did not say where to look`);
+    }
+  });
+
   test('an answer carrying no status at all is not a send either', async () => {
     // The worst of the three: with no status in the answer the note read
     // `Status "unbekannt" → wird versandt`, which says in one breath that it
@@ -192,6 +217,40 @@ describe('nothing is mailed by accident', () => {
     assert.equal(data.created.status, undefined, 'the fixture did answer without one');
     assert.doesNotMatch(data.note, /wird versandt/, `claimed a send off no status at all: ${data.note}`);
     assert.match(data.note, /pingen_get_letter/);
+  });
+
+  test('auto_send=true without a product mails nothing', async () => {
+    // delivery_product is optional on this tool for exactly one reason: a draft
+    // is franked later, by pingen_submit_letter, and that call was taught to
+    // refuse without one because "required: in a schema is a hint, not a
+    // check" — a letter franked however Pingen likes is in the post by the time
+    // anyone looks. auto_send=true is the one route that never reaches that
+    // call, so on it the product nobody chose was the product the letter went
+    // out with, and the tool reported "wird versandt" over the top of it. The
+    // gate on the second step has to guard the shortcut past it too.
+    const before = {
+      created: mock.state.created.length,
+      slots: mock.state.calls.filter(c => c === 'GET /file-upload').length,
+      uploads: mock.state.uploads.length,
+    };
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf, auto_send: true });
+    // The consequence before the wording: asserted the other way round, a
+    // regression fails on `refused` being undefined, which reads like a broken
+    // test rather than a letter in the post with a product nobody chose.
+    assert.equal(mock.state.created.length, before.created,
+      `a letter was accepted for printing with no product chosen: ${JSON.stringify(mock.state.created.at(-1))}`);
+    assert.equal(mock.state.calls.filter(c => c === 'GET /file-upload').length, before.slots, 'it asked for an upload slot first');
+    assert.equal(mock.state.uploads.length, before.uploads, 'the PDF left the machine for it');
+    assert.match(String(data.refused), /delivery_product/, `it named something else: ${JSON.stringify(data)}`);
+  });
+
+  test('a draft still needs no product, because submit will ask for one', async () => {
+    // The other half, and the reason the check above is conditional: making
+    // delivery_product mandatory outright would break the two-step flow, where
+    // the product is chosen at pingen_submit_letter and the draft carries none.
+    const { data } = await srv.call('pingen_send_letter', { file_path: pdf });
+    assert.equal(data.created.status, 'draft');
+    assert.equal(mock.state.created.at(-1).delivery_product, undefined, 'no product is invented for a draft');
   });
 
   test('a list limit cannot smuggle extra query parameters into the request', async () => {
@@ -226,6 +285,49 @@ describe('nothing is mailed by accident', () => {
     const sendCalls = mock.state.calls.filter(c => c.endsWith('/send'));
     assert.deepEqual([...new Set(sendCalls.map(c => c.split(' ')[0]))], ['PATCH'],
       'the API only accepts PATCH here; a POST would 405 and quietly mail nothing');
+  });
+
+  test('a submission Pingen did not act on is not reported as a send', async () => {
+    // The same defect that was taken out of pingen_send_letter's note twice
+    // over, left standing in the tool that actually prints and posts:
+    // "submitted" was concluded from the PATCH coming back 2xx, not from the
+    // status that came back with it. Pingen can accept this call and leave the
+    // letter exactly where it was — a draft whose address it cannot read
+    // answers 200, status action_required — and the result then reads as a
+    // receipt for a letter that is not going anywhere. Nobody checks, because
+    // the tool said it was posted, and the bill is never sent.
+    mock.state.sendStatus = 'action_required';
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    mock.state.sendStatus = null;
+    assert.match(data.note, /NICHT unterwegs/, `claimed a send Pingen did not make: ${JSON.stringify(data)}`);
+    assert.match(data.note, /action_required/, 'and it says what Pingen actually reported');
+  });
+
+  test('a send status nobody here has heard of is not reported as a send', async () => {
+    mock.state.sendStatus = 'quarantined';
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    mock.state.sendStatus = null;
+    assert.doesNotMatch(data.note, /geht raus/, `guessed in the direction of "it went": ${JSON.stringify(data)}`);
+    assert.match(data.note, /quarantined/);
+    assert.match(data.note, /pingen_get_letter/, 'and says where to go and look');
+  });
+
+  test('a send answer carrying no status is not reported as a send either', async () => {
+    mock.state.omitSendStatus = true;
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    mock.state.omitSendStatus = false;
+    assert.equal(data.submitted.status, undefined, 'the fixture did answer without one');
+    assert.doesNotMatch(data.note, /geht raus/, `claimed a send off no status at all: ${JSON.stringify(data)}`);
+    assert.match(data.note, /pingen_get_letter/);
+  });
+
+  test('a submission Pingen did take is reported as one', async () => {
+    // The half that must keep working: an answer that says the letter has been
+    // taken for printing has to read as a send, or the note becomes noise and
+    // noise is how a real warning gets read past.
+    const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    assert.equal(data.submitted.status, 'processing');
+    assert.match(data.note, /geht raus/, `a genuine send was hedged: ${JSON.stringify(data)}`);
   });
 
   test('a token revoked mid-session costs one retry, not a second letter', async () => {

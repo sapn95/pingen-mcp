@@ -39,6 +39,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     authHeaders: [],      // every Authorization header the API saw
     tokenGrants: 0,
     nextStatus: null,      // force the next created letter's status
+    // The same knob for the one call that actually prints and posts. Answering
+    // every PATCH .../send with "processing" meant the tool could be asked only
+    // the question it already knew the answer to: a 200 that leaves the letter
+    // sitting exactly where it was could not be modelled at all.
+    sendStatus: null,
+    omitSendStatus: false,
     // Some answers carry no status at all, and `nextStatus` cannot express that
     // — it is or-ed against the default. The tool's worst wrong answer used to
     // be exactly this case: "Status "unbekannt" → wird versandt", a claim about
@@ -63,6 +69,22 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // included — could not be reached at all: a mock that honours every token
     // it ever issued can only ever show the happy half of it.
     revokedTokens: [],
+    // The tracking trail, as a list a test can lengthen. It used to be two
+    // events hardcoded in the handler, which is fewer than any page holds — so
+    // the endpoint could never answer a full page, and a tool that hands one
+    // page over as the whole history looked exactly like one that had read it
+    // to the end. The letters collection has been able to show that since round
+    // 14; its sibling could not.
+    eventTrail: [
+      { id: 'ev-1', type: 'letter_events', attributes: { type: 'letter.created', emitted_at: '2026-07-01T09:00:00+00:00', data: { by: 'api' } } },
+      { id: 'ev-2', type: 'letter_events', attributes: { type: 'letter.sent', emitted_at: '2026-07-01T09:30:00+00:00', data: null } },
+    ],
+    // Answer the events page with neither a next link nor a total. Not every
+    // endpoint volunteers how much more there is, and the letters collection
+    // already has a branch for exactly that case — a page that came back
+    // exactly full being the last evidence available. This is how that case is
+    // put to the events tool as well.
+    eventsQuiet: false,
     // Set to a promise to hold the letter that fails loudly open, so a second
     // call can overtake it while its response is still on the way back.
     holdLeak: null,
@@ -73,6 +95,13 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // request is over — which is where the redactor has to still know the token.
     holdEcho: null,
     orgs: [{ id: ORG, type: 'organisations', attributes: { name: 'Test Org', plan: 'free', status: 'active' } }],
+    // /organisations is a collection like any other and paginates like one. It
+    // used to answer with the whole array however many there were, so the tool
+    // that picks which account pays for a letter could only ever be asked the
+    // easy question. This is the largest page it will hand out whatever the
+    // caller asks for, because that is the part a caller cannot fix by asking
+    // for more: a page size is a request, and the API decides.
+    orgPageMax: 20,
     letters: [
       // Deliberately out of order in the array: the API is asked for
       // newest-first, and a mock that hands back insertion order cannot show
@@ -158,7 +187,15 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (!bearerOk(req)) return send(401, { error: 'unauthorized' });
     state.authHeaders.push(req.headers.authorization || '');
 
-    if (p === '/organisations' && req.method === 'GET') return send(200, { data: state.orgs });
+    if (p === '/organisations' && req.method === 'GET') {
+      const limit = Math.min(Number(url.searchParams.get('page[limit]') || state.orgPageMax), state.orgPageMax);
+      const page = state.orgs.slice(0, limit);
+      return send(200, {
+        data: page,
+        links: { next: page.length < state.orgs.length ? `${base}/organisations?page[number]=2` : null },
+        meta: { total: state.orgs.length, per_page: limit, current_page: 1 },
+      });
+    }
 
     const m = /^\/organisations\/([^/]+)\/deliveries\/letters(?:\/([^/]+))?(?:\/(\w+))?$/.exec(p);
     if (!m) return send(404, { error: 'no_route', path: p });
@@ -232,7 +269,8 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       if (req.method !== 'PATCH') return send(405, { error: 'method_not_allowed', allowed: ['PATCH'] });
       const body = JSON.parse((await read()).toString() || '{}');
       state.submitted.push({ id, attributes: body.data?.attributes || {} });
-      known.attributes = { ...known.attributes, ...body.data?.attributes, status: 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
+      known.attributes = { ...known.attributes, ...body.data?.attributes, status: state.sendStatus || 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
+      if (state.omitSendStatus) delete known.attributes.status;
       return send(200, { data: known });
     }
     if (tail === 'cancel') {
@@ -251,11 +289,20 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       // query said, so that regression could not have been seen here.
       const sort = url.searchParams.get('sort');
       if (sort !== '-emitted_at') return send(400, { error: 'unsupported_sort', got: sort });
-      const evs = [
-        { id: 'ev-1', type: 'letter_events', attributes: { type: 'letter.created', emitted_at: '2026-07-01T09:00:00+00:00', data: { by: 'api' } } },
-        { id: 'ev-2', type: 'letter_events', attributes: { type: 'letter.sent', emitted_at: '2026-07-01T09:30:00+00:00', data: null } },
-      ];
-      return send(200, { data: evs.sort((a, b) => b.attributes.emitted_at.localeCompare(a.attributes.emitted_at)) });
+      // A page size, like every other collection here. Absent, the API picks
+      // one — which is the whole difficulty for a caller that never says what
+      // it wants: it cannot tell a page that happened to end from a page that
+      // was cut off.
+      const limit = Number(url.searchParams.get('page[limit]') || 20);
+      const newestFirst = [...state.eventTrail].sort((a, b) =>
+        String(b.attributes?.emitted_at || '').localeCompare(String(a.attributes?.emitted_at || '')));
+      const page = newestFirst.slice(0, limit);
+      if (state.eventsQuiet) return send(200, { data: page });
+      return send(200, {
+        data: page,
+        links: { next: page.length < newestFirst.length ? `${base}/organisations/${ORG}/deliveries/letters/${id}/events?page[number]=2` : null },
+        meta: { total: newestFirst.length, per_page: limit, current_page: 1 },
+      });
     }
     if (tail === 'file' && req.method === 'GET') {
       // Three shapes the API is known to answer with, all of which the tool
