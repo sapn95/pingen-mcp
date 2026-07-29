@@ -177,7 +177,10 @@ route that never reaches that call.
 
 A draft must reach status **`valid`** before it can be submitted. If Pingen
 still needs something (e.g. the address couldn't be read), the draft is
-`action_required` and submit will fail — see *Troubleshooting*.
+`action_required` and submit will fail — see *Troubleshooting*. `pingen_send_letter`
+says so on the spot: a letter that comes back `action_required` or `invalid` is
+reported as a draft Pingen will **not** take, with the status and where to look,
+and not with the usual "now submit it".
 
 ---
 
@@ -187,8 +190,8 @@ still needs something (e.g. the address couldn't be read), the draft is
 | --- | --- | --- |
 | `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. That list paginates too: if it is only a page, the result says `truncated: true`, and a configured `PINGEN_ORG_UUID` that is simply not on that page is no longer announced as belonging to no reachable organisation. |
 | `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. One page only: if Pingen has more, the result also carries `truncated: true` — so *"nothing went to that address"* is never concluded from a list that was never read to the end. |
-| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional for a draft, **required with `auto_send: true`**); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately; without a `delivery_product` that call is refused before anything is uploaded, because nothing asks for a product later and the letter would be franked however Pingen falls back. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown in both directions — neither as a send nor as "not a draft", because guessing the second shuts the two-step flow down just as confidently as guessing the first opens it. |
-| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. Returns the submitted letter row plus a note, and the note is decided by the status that came back rather than by the call having been accepted: Pingen answering 200 while leaving the letter in `action_required` is reported as **not** on its way, and a status this server does not recognise — or none at all — is reported as unknown rather than as a send. |
+| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional for a draft, **required with `auto_send: true`**); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately; without a `delivery_product` that call is refused before anything is uploaded, because nothing asks for a product later and the letter would be franked however Pingen falls back. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown in both directions — neither as a send nor as "not a draft", because guessing the second shuts the two-step flow down just as confidently as guessing the first opens it. A resting status is not one answer either: `action_required` and `invalid` are Pingen refusing the PDF, so those are reported as a draft it will not take rather than as one waiting to be submitted. |
+| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. The result is decided by the status that came back rather than by the call having been accepted: only when Pingen says it has taken the letter is the row filed under `submitted`; otherwise it comes back as `letter` with a note saying so, so Pingen answering 200 while leaving it in `action_required` is reported as **not** on its way, and a status this server does not recognise — or none at all — is reported as unknown rather than as a send. |
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |
 | `pingen_cancel_letter` | `letter_id` (required) | Cancels an already-submitted/sent letter where Pingen still allows it. Returns `{ cancelled: <id> }`. |
 | `pingen_delete_letter` | `letter_id` (required); **`confirm: true` (required)** | Deletes a draft / not-yet-sent letter for good. To stop a letter already on its way use `pingen_cancel_letter`. Returns `{ deleted: <id> }`. |
@@ -324,7 +327,9 @@ test can reach the real API, the real login keychain, or the post**. Alongside
 the happy paths it pins the properties that matter — that `pingen_send_letter`
 creates a draft and submits nothing, that a non-boolean `auto_send` still yields
 a draft, that neither of the two calls that reach the post will do so without a
-`delivery_product`, that neither of them reports a send Pingen did not confirm,
+`delivery_product`, that neither of them reports a send Pingen did not confirm —
+in the note or in the key the letter is filed under — that a draft Pingen has
+flagged is never announced as ready to post,
 that submitting is a `PATCH`, and that no token or client secret can
 appear in a tool result or on stderr even when the upstream error body quotes it
 back. The gate fails below 90% line, 90% function and 80% branch coverage of
