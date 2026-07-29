@@ -95,13 +95,33 @@ let ORG = envOrKeychain('PINGEN_ORG_UUID', 'pingen-mcp-org-uuid');
 
 let token = null, tokenExp = 0, pendingToken = null;
 
+// Every bearer this process has held, not only the one it is holding now. The
+// redactor used to read the live variable, so a token replaced between a
+// request going out and its error coming back was no longer a token it knew
+// about: two tool calls are enough, because the second one re-grants — after a
+// 401, or simply because the first token was near expiry — while the first is
+// still in flight, and this API answers a 500 by quoting the Authorization
+// header it was given. The old bearer, still valid, went into the tool result
+// verbatim.
+//
+// Bounded on purpose. An upstream that answers 401 to everything mints one
+// token per call, and a set that only ever grows would cost memory and a pass
+// over every string that leaves here. Eight is far more than can be issued
+// inside the two minutes the longest-lived request is allowed to take, so
+// nothing that could still be in flight is ever forgotten.
+const tokensHeld = new Set();
+function rememberToken(t) {
+  tokensHeld.add(t);
+  while (tokensHeld.size > 8) tokensHeld.delete(tokensHeld.values().next().value);
+}
+
 // A tool result is handed straight to the model, and an upstream error body can
 // quote the request that produced it — Pingen's token endpoint does exactly
 // that. Strip anything secret out of every string that leaves this process, in
 // each form it could have travelled in: raw, JSON-escaped, percent-encoded.
 function redact(s) {
   let out = String(s ?? '');
-  for (const v of [CLIENT_SECRET, CLIENT_ID, token]) {
+  for (const v of [CLIENT_SECRET, CLIENT_ID, ...tokensHeld]) {
     // Short values are left alone deliberately: a 4-character string is far
     // more likely to be ordinary text than a credential, and mangling every
     // occurrence of it would make errors unreadable. Real Pingen credentials
@@ -141,7 +161,7 @@ async function requestToken() {
   }
   const j = await r.json();
   if (typeof j.access_token !== 'string' || !j.access_token) throw new Error('Token-Antwort ohne access_token.');
-  token = j.access_token; tokenExp = Date.now() + (Number(j.expires_in) || 43200) * 1000;
+  token = j.access_token; rememberToken(token); tokenExp = Date.now() + (Number(j.expires_in) || 43200) * 1000;
   return token;
 }
 
@@ -335,7 +355,16 @@ server.setRequestHandler(CallToolRequestSchema, async req => {
       const more = d.links?.next ? true
         : d.meta?.total != null ? d.meta.total > letters.length
           : letters.length >= limit;
-      return text({ letters, ...(more ? { truncated: true, hint: `nur die neuesten ${letters.length} — Pingen hat weitere; limit erhöhen (max 100)` } : {}) });
+      // "limit erhöhen (max 100)" was told to a caller who had already asked
+      // for 100, which is advice nobody can follow: the tool has no page
+      // parameter, so at the largest page the older letters are simply not
+      // reachable through it. A model that is told to raise a limit it is
+      // already at raises it again, gets the same hundred, and asks a paid API
+      // in a circle. At the cap it now says what is actually left to do.
+      const hint = limit >= 100
+        ? `nur die neuesten ${letters.length}, und 100 ist die grösste Seite — ältere Briefe sind über diese Liste nicht erreichbar, nur per pingen_get_letter mit bekannter letter_id`
+        : `nur die neuesten ${letters.length} — Pingen hat weitere; limit erhöhen (max 100)`;
+      return text({ letters, ...(more ? { truncated: true, hint } : {}) });
     }
     if (name === 'pingen_get_letter') {
       const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}`);
