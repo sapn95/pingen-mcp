@@ -272,6 +272,21 @@ describe('failure paths', () => {
     assert.equal(mock.state.calls.filter(c => c === 'GET /file-upload').length, before.slots, 'no upload slot was even requested');
   });
 
+  test('a file descriptor is not the letter to mail', async () => {
+    // The mirror of the output_path check, and the more consequential half:
+    // readFileSync takes a number as a file descriptor, so file_path: 0 reads
+    // this server's own MCP input stream and a character device never ends.
+    // Only the output side of that pair had ever been exercised.
+    const before = { slots: mock.state.calls.filter(c => c === 'GET /file-upload').length, uploads: mock.state.uploads.length };
+    for (const bad of [0, 1, null, '', '   ', { path: pdf }]) {
+      const { raw, isError } = await srv.call('pingen_send_letter', { file_path: bad });
+      assert.ok(isError, `file_path ${JSON.stringify(bad)} was accepted`);
+      assert.match(raw, /file_path muss ein Pfad sein/);
+    }
+    assert.equal(mock.state.calls.filter(c => c === 'GET /file-upload').length, before.slots, 'an upload slot was requested for it');
+    assert.equal(mock.state.uploads.length, before.uploads, 'something was PUT for it');
+  });
+
   test('a file that is not a PDF never leaves the machine', async () => {
     const notPdf = join(out, 'secrets.txt');
     writeFileSync(notPdf, 'BEGIN PRIVATE KEY not a letter at all');

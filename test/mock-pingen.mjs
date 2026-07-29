@@ -53,6 +53,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     rotateTokens: false,
     tokenTtl: 3600,       // drop this and the server re-grants on every call
     issuedTokens: [],
+    // Bearers this server has stopped accepting. Without them the 401 path in
+    // the client — the one that re-grants and replays the request, mutations
+    // included — could not be reached at all: a mock that honours every token
+    // it ever issued can only ever show the happy half of it.
+    revokedTokens: [],
     // Set to a promise to hold the letter that fails loudly open, so a second
     // call can overtake it while its response is still on the way back.
     holdLeak: null,
@@ -74,6 +79,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
   // was handed out.
   const bearerOk = req => {
     const h = req.headers.authorization || '';
+    if (state.revokedTokens.some(t => h === `Bearer ${t}`)) return false;
     return h === `Bearer ${TOKEN}` || state.issuedTokens.some(t => h === `Bearer ${t}`);
   };
   const srv = createServer(async (req, res) => {

@@ -106,13 +106,41 @@ let token = null, tokenExp = 0, pendingToken = null;
 //
 // Bounded on purpose. An upstream that answers 401 to everything mints one
 // token per call, and a set that only ever grows would cost memory and a pass
-// over every string that leaves here. Eight is far more than can be issued
-// inside the two minutes the longest-lived request is allowed to take, so
-// nothing that could still be in flight is ever forgotten.
+// over every string that leaves here.
+//
+// The bound used to be a plain count of eight, on the reasoning that no more
+// than that could be minted while a request was still out. It can be: eight
+// ordinary tool calls are enough, because each of them re-grants — after a 401,
+// or because the token it was handed came back near expiry — and eight grants
+// push the bearer of the request that is still travelling off the end of the
+// set. That bearer is the one the answer to that very request quotes back, so
+// the one token the redactor most needs was the first one it dropped, and it
+// reached the tool result while it was still valid. A count could never have
+// held that line: the number of grants during a request has nothing to do with
+// how long the request takes.
+//
+// So what is still out is pinned, and only what is not can be forgotten. The
+// set is bounded by eight plus however many requests are genuinely in flight,
+// which is bounded by the client, and every bearer that can still come back
+// quoted is in it.
 const tokensHeld = new Set();
-function rememberToken(t) {
-  tokensHeld.add(t);
-  while (tokensHeld.size > 8) tokensHeld.delete(tokensHeld.values().next().value);
+const tokensOut = new Map();
+function rememberToken(t) { tokensHeld.add(t); forgetSpent(); }
+function forgetSpent() {
+  for (const t of tokensHeld) {
+    if (tokensHeld.size <= 8) break;
+    if (t === token || tokensOut.has(t)) continue;
+    tokensHeld.delete(t);
+  }
+}
+// Held from the moment a request is given a bearer until its answer has been
+// turned into a result or a message — which is where redact() runs — and not a
+// moment less.
+function holdToken(t) { tokensOut.set(t, (tokensOut.get(t) ?? 0) + 1); }
+function releaseToken(t) {
+  const n = (tokensOut.get(t) ?? 0) - 1;
+  if (n > 0) tokensOut.set(t, n); else tokensOut.delete(t);
+  forgetSpent();
 }
 
 // A tool result is handed straight to the model, and an upstream error body can
@@ -177,22 +205,35 @@ function letterId(v) {
 }
 
 async function api(method, path, { json, raw, retry = true } = {}) {
-  const headers = { Authorization: `Bearer ${await accessToken()}`, Accept: 'application/vnd.api+json' };
+  const bearer = await accessToken();
+  const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.api+json' };
   let bodyInit;
   if (json !== undefined) { headers['Content-Type'] = 'application/vnd.api+json'; bodyInit = JSON.stringify(json); }
-  const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
-  // A 401 means the request was refused before it did anything, so retrying it
-  // once with a fresh token is safe even for a mutation — and it is the
-  // difference between a revoked token costing one call and costing every call
-  // until the process restarts.
-  if (r.status === 401 && retry) {
-    token = null; tokenExp = 0;
-    return api(method, path, { json, raw, retry: false });
+  // This is the bearer that can come back quoted, so it stays known to the
+  // redactor for exactly as long as the request is out. The release is in a
+  // finally and the masking is in the message that is thrown, so the error is
+  // built while the token is still pinned.
+  holdToken(bearer);
+  try {
+    const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
+    // A 401 means the request was refused before it did anything, so retrying it
+    // once with a fresh token is safe even for a mutation — and it is the
+    // difference between a revoked token costing one call and costing every call
+    // until the process restarts.
+    if (r.status === 401 && retry) {
+      token = null; tokenExp = 0;
+      // Awaited rather than handed back: `return promise` inside a try runs the
+      // finally as soon as the promise exists, which would unpin this bearer
+      // while the retry is still travelling with the next one.
+      return await api(method, path, { json, raw, retry: false });
+    }
+    if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
+    if (raw) return r;
+    const txt = await r.text();
+    return txt ? JSON.parse(txt) : {};
+  } finally {
+    releaseToken(bearer);
   }
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
-  if (raw) return r;
-  const txt = await r.text();
-  return txt ? JSON.parse(txt) : {};
 }
 
 // Discovered once and remembered, and — like the token — looked up only once

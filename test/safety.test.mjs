@@ -184,6 +184,32 @@ describe('nothing is mailed by accident', () => {
     assert.deepEqual([...new Set(sendCalls.map(c => c.split(' ')[0]))], ['PATCH'],
       'the API only accepts PATCH here; a POST would 405 and quietly mail nothing');
   });
+
+  test('a token revoked mid-session costs one retry, not a second letter', async () => {
+    // The 401 path re-grants and replays the request, and it replays mutations
+    // too — the reasoning being that a 401 is refused by the authorisation
+    // layer before the handler ever sees it, so nothing happened the first
+    // time. That reasoning had never once been executed: the mock honoured
+    // every token it had ever issued, so in thirteen rounds the branch that
+    // re-sends a PATCH .../send was never taken, and "it replays a mutation
+    // safely" was an assertion about code nothing had run. What it must not do
+    // is print the letter twice.
+    const m = await start();
+    m.state.rotateTokens = true;
+    const s = await startServer({ PINGEN_API_BASE: m.base });
+    await s.call('pingen_list_letters');            // mints the bearer that is about to die
+    m.state.revokedTokens.push(m.state.issuedTokens[0]);
+    const { data, isError } = await s.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    const sends = m.state.calls.filter(c => c.endsWith('/send')).length;
+    const submitted = m.state.submitted.length;
+    const grants = m.state.issuedTokens.length;
+    await s.stop();
+    await m.close();
+    assert.ok(!isError, `a revoked token cost the whole call: ${JSON.stringify(data)}`);
+    assert.equal(grants, 2, 'exactly one fresh grant, not one per attempt');
+    assert.equal(sends, 2, 'the refused attempt and the replay — and no third');
+    assert.equal(submitted, 1, 'the letter was accepted for printing exactly once');
+  });
 });
 
 describe('credentials never leave the process', () => {
@@ -247,6 +273,44 @@ describe('credentials never leave the process', () => {
     assert.ok(grants >= 2, `the fixture never rotated the token (${grants} grant(s))`);
     assert.ok(isError, 'the failure is still reported');
     assert.ok(!raw.includes(stale), `a bearer this process issued reached a tool result: ${raw}`);
+    assert.match(raw, /\*\*\*/, 'it is masked, not merely absent');
+  });
+
+  test('a bearer is not forgotten while its own request is still travelling', async () => {
+    // The set of bearers the redactor knows about was bounded by a plain count
+    // of eight, on the reasoning that no more than that could be minted while a
+    // request was still out. Eight ordinary tool calls do it: each of them
+    // re-grants, because the token it was handed came back near expiry, and the
+    // eighth pushes the bearer that the slow request is still travelling with
+    // off the end of the set. That bearer is precisely the one the answer to
+    // that request quotes back, so the token the redactor most needed was the
+    // first one it dropped — and it reached the tool result while it was still
+    // valid. How many grants happen during a request has nothing to do with how
+    // long the request takes, which is why a count could never hold that line.
+    const m = await start();
+    m.state.rotateTokens = true;
+    m.state.tokenTtl = 1;                  // near expiry on arrival: every call re-grants
+    let release;
+    m.state.holdLeak = new Promise(r => { release = r; });
+    const s = await startServer({ PINGEN_API_BASE: m.base });
+    const slow = s.call('pingen_get_letter', { letter_id: 'ltr-leak' });
+    const deadline = Date.now() + 10000;
+    while (!m.state.calls.some(c => c.endsWith('/ltr-leak')) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    // A dozen where eight was already enough: what the test is about is "more
+    // grants than the set will hold", and the margin keeps it meaningful if
+    // that number is ever nudged upwards.
+    for (let i = 0; i < 12; i++) await s.call('pingen_get_letter', { letter_id: 'ltr-1' });
+    release();
+    const { raw, isError } = await slow;
+    const [stale] = m.state.issuedTokens;
+    const grants = m.state.issuedTokens.length;
+    await s.stop();
+    await m.close();
+    assert.ok(grants > 8, `the fixture never got past the bound (${grants} grant(s))`);
+    assert.ok(isError, 'the failure is still reported');
+    assert.ok(!raw.includes(stale), `a bearer its own request was still out with reached a tool result: ${raw}`);
     assert.match(raw, /\*\*\*/, 'it is masked, not merely absent');
   });
 
