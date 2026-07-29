@@ -264,15 +264,40 @@ function orgId() {
   pendingOrg ??= discoverOrg().finally(() => { pendingOrg = null; });
   return pendingOrg;
 }
-async function discoverOrg() {
-  const d = await api('GET', '/organisations');
+// /organisations is a collection and paginates like every other one here, and
+// it is the collection where reading a page as the whole list decides which
+// account pays for and franks a letter. Both other list tools were taught that
+// lesson; this one was never looked at, because with one organisation in the
+// account the page and the list are the same thing and nothing ever disagreed.
+// The page size is asked for rather than left to the API, for the same reason as
+// the tracking trail: a caller that does not say how big a page it wants cannot
+// tell a full one from a short one. What the answer volunteers is better
+// evidence than that, so the count and the next link are read first.
+const ORG_PAGE = 100;
+async function listOrganisations() {
+  const d = await api('GET', `/organisations?page[limit]=${ORG_PAGE}`);
   const orgs = d.data || [];
+  const more = d.links?.next ? true
+    : d.meta?.total != null ? d.meta.total > orgs.length
+      : orgs.length >= ORG_PAGE;
+  return { orgs, more };
+}
+async function discoverOrg() {
+  const { orgs, more } = await listOrganisations();
   if (!orgs.length) throw new Error('Keine Organisation gefunden.');
   // Only auto-select when there is nothing to choose. With several, taking the
   // first one off a collection would decide — silently — which account pays for
   // and franks the letter.
-  if (orgs.length > 1) {
-    throw new Error(`${orgs.length} Organisationen — PINGEN_ORG_UUID setzen: ${orgs.map(o => `${o.id} (${o.attributes?.name})`).join(', ')}`);
+  //
+  // "Several" used to mean "several on the page that came back", which is not
+  // the same question. An account whose organisations do not fit one page hands
+  // back a page of one, and a page of one is indistinguishable from an account
+  // that has one — so the guard stood down and the first entry of an
+  // alphabetical page became the account the letter was billed to, with nothing
+  // said. A list that admits to being incomplete is a choice, not a default.
+  if (orgs.length > 1 || more) {
+    const count = more ? `Mindestens ${orgs.length}` : `${orgs.length}`;
+    throw new Error(`${count} Organisationen — PINGEN_ORG_UUID setzen: ${orgs.map(o => `${o.id} (${o.attributes?.name})`).join(', ')}${more ? ' — und das ist nur die erste Seite' : ''}`);
   }
   ORG = orgs[0].id;
   return ORG;
@@ -355,12 +380,18 @@ function letterRow(d) {
 const RESTING = new Set(['draft', 'valid', 'action_required', 'invalid']);
 const MOVING = new Set(['processing', 'sending', 'sent', 'delivered']);
 
+// How much of a tracking trail to ask for in one go. A letter's history is a
+// handful of entries, so this is far more than any real one has — which is the
+// point: the number exists so that a page coming back exactly this full is
+// evidence of more, and a threshold nothing ever reaches raises no false alarm.
+const EVENT_PAGE = 100;
+
 const TOOLS = [
   { name: 'pingen_status', description: 'Verify credentials and show the active Pingen organisation (name, plan, id).', inputSchema: { type: 'object', properties: {} } },
   { name: 'pingen_list_letters', description: 'List letters with status and tracking. Optional page size.', inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'page size (default 20)' } } } },
-  { name: 'pingen_send_letter', description: 'Upload a PDF and create a letter. By default a DRAFT (auto_send=false) — nothing is mailed until pingen_submit_letter. Set auto_send=true to send immediately.', inputSchema: { type: 'object', properties: {
+  { name: 'pingen_send_letter', description: 'Upload a PDF and create a letter. By default a DRAFT (auto_send=false) — nothing is mailed until pingen_submit_letter. Set auto_send=true to mail immediately; that path also requires delivery_product, because it is the one route that never reaches pingen_submit_letter and so nothing asks for a product later.', inputSchema: { type: 'object', properties: {
       file_path: { type: 'string', description: 'absolute path to the PDF' },
-      delivery_product: { type: 'string', description: 'e.g. cheap (B-Post), fast (A-Post), registered (Einschreiben), premium — CH values' },
+      delivery_product: { type: 'string', description: 'e.g. cheap (B-Post), fast (A-Post), registered (Einschreiben), premium — CH values. Optional for a draft, required with auto_send=true' },
       address_position: { type: 'string', enum: ['left', 'right'], description: 'window position of the address on the first page (default left)' },
       auto_send: { type: 'boolean', description: 'default false = create draft only' },
     }, required: ['file_path'] } },
@@ -380,16 +411,25 @@ const callTool = async req => {
   const text = s => ({ content: [{ type: 'text', text: redact(typeof s === 'string' ? s : JSON.stringify(s, null, 1)) }] });
   try {
     if (name === 'pingen_status') {
-      const d = await api('GET', '/organisations');
-      const orgs = (d.data || []).map(o => ({ id: o.id, name: o.attributes?.name, plan: o.attributes?.plan, status: o.attributes?.status }));
+      const { orgs: found, more } = await listOrganisations();
+      const orgs = found.map(o => ({ id: o.id, name: o.attributes?.name, plan: o.attributes?.plan, status: o.attributes?.status }));
       const active = await orgId();
       // A configured UUID was reported as active without checking it is one of
       // ours: a stale or mistyped value produced a confident, false answer, and
       // every later call then 404s for reasons this tool said were fine.
       if (!orgs.some(o => o.id === active)) {
+        // The check itself then produced the mirror-image wrong answer, for the
+        // same reason: absent from the page it read is not absent from the
+        // account. A correctly configured UUID that happened to sort onto a
+        // later page was announced as belonging to no reachable organisation —
+        // an answer, not a failure, and one that sends the reader off to fix a
+        // setting that was never broken.
+        if (more) {
+          return text({ organisations: orgs, truncated: true, active, note: `Nur die erste Seite der Organisationen — ob ${active} dazugehört, ist damit nicht entschieden; die Aufrufe darunter zeigen es.` });
+        }
         return text({ organisations: orgs, active: null, error: `PINGEN_ORG_UUID ${active} gehört zu keiner erreichbaren Organisation` });
       }
-      return text({ organisations: orgs, active });
+      return text({ organisations: orgs, ...(more ? { truncated: true } : {}), active });
     }
     // Before anything authenticates: an unknown name is a client bug, and
     // resolving an organisation for it both lies with isError:false and warms
@@ -440,6 +480,20 @@ const callTool = async req => {
       return text(letterRow(d.data));
     }
     if (name === 'pingen_send_letter') {
+      // delivery_product is optional here for one reason only: a draft is
+      // franked later, by pingen_submit_letter, and that call refuses to run
+      // without one — "required: in a schema is a hint, not a check" was
+      // written about exactly that. auto_send=true is the single path that
+      // never reaches submit, so on that path the promise "somebody will be
+      // asked which product" is kept by nobody: the letter was uploaded,
+      // accepted, printed and franked with whatever Pingen falls back to, and
+      // the tool reported "wird versandt" over the top of it. The gate that
+      // guards the second step has to guard the shortcut past it as well.
+      // Refused up here, so it costs no token, no organisation lookup and no
+      // upload, the same way an unconfirmed submit does.
+      if (args.auto_send === true && (typeof args.delivery_product !== 'string' || !args.delivery_product.trim())) {
+        return text({ refused: 'delivery_product ist bei auto_send=true erforderlich', note: 'auto_send=true druckt und frankiert den Brief sofort — ohne Produkt entscheidet Pingen, und der Brief ist bereits unterwegs, wenn man nachschaut. z. B. cheap (B-Post), fast (A-Post), registered (Einschreiben). Ohne auto_send entsteht ein Entwurf, und das Produkt wird bei pingen_submit_letter gewählt.' });
+      }
       // Which account this letter belongs to is settled before its contents
       // leave the machine. Resolving the organisation lazily at the POST meant
       // an account with several of them uploaded the PDF into Pingen's storage
@@ -470,12 +524,26 @@ const callTool = async req => {
       //
       // So both halves are decided by the status that came back, and a status
       // in neither list is reported as unknown rather than guessed at.
+      //
+      // That was said of both halves and was true of one. The auto_send=false
+      // half had two answers where it needed three: everything that was not a
+      // resting state was announced as "das ist kein Entwurfszustand", which is
+      // a positive claim about a status this code has never seen — and, for an
+      // answer carrying none at all, the very sentence the round before had been
+      // written to remove, only pointing the other way: it said in one breath
+      // that it did not know the status and that it knew the letter was not a
+      // draft. The cost is not hypothetical. Let Pingen add one pre-print state
+      // this version predates and every ordinary draft creation starts answering
+      // "NICHT mit pingen_submit_letter nachfassen" — which is the whole flow of
+      // this server, talked out of itself by a guess.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
       const note = !attributes.auto_send
         ? RESTING.has(status)
           ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
-          : `auto_send=false, aber Pingen meldet Status "${shown}" — das ist kein Entwurfszustand. NICHT mit pingen_submit_letter nachfassen, sonst geht der Brief womöglich zweimal raus. Prüfen: pingen_get_letter.`
+          : MOVING.has(status)
+            ? `auto_send=false, aber Pingen meldet Status "${shown}" — der Brief ist bereits zum Druck angenommen. NICHT mit pingen_submit_letter nachfassen, sonst geht er zweimal raus. Prüfen: pingen_get_letter.`
+            : `auto_send=false, und Pingen meldet Status "${shown}" — den kennt dieser Server nicht; ob der Brief ein Entwurf ist oder schon läuft, sagt das nicht. Erst pingen_get_letter, dann entscheiden, ob pingen_submit_letter nötig ist — blind nachfassen kann ihn zweimal rausschicken.`
         : RESTING.has(status)
           ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt. Details: pingen_get_letter.`
           : MOVING.has(status)
@@ -500,7 +568,29 @@ const callTool = async req => {
       }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
       const d = await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
-      return text({ submitted: letterRow(d.data) });
+      // "submitted" used to be the whole answer, and it was concluded from the
+      // PATCH having come back 2xx — that is, from the request we made rather
+      // than from the answer we got. Twice now that same reasoning has been
+      // taken out of pingen_send_letter's note, and both times the tool that
+      // actually prints and posts was left with it. Pingen can accept this call
+      // and leave the letter exactly where it was: a draft it will not take
+      // until the address is readable comes back 200, status action_required,
+      // under a key that reads as a receipt. "Your letter has been mailed" is
+      // then a false statement about the physical world in the direction nobody
+      // checks — the bill is never posted and nobody goes looking, because the
+      // tool said it was.
+      //
+      // Same two lists as the create path, and the same rule: a status in
+      // neither of them, or none at all, is reported as not knowing rather than
+      // as a send.
+      const status = d.data?.attributes?.status;
+      const shown = status ?? 'keinen';
+      const note = MOVING.has(status)
+        ? `Pingen meldet Status "${shown}" — zum Druck angenommen, der Brief geht raus.`
+        : RESTING.has(status)
+          ? `Pingen meldet Status "${shown}" — der Brief liegt weiterhin bei Pingen und ist NICHT unterwegs. Ursache prüfen: pingen_get_letter, danach erneut senden.`
+          : `Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter, und nicht blind ein zweites Mal senden.`;
+      return text({ submitted: letterRow(d.data), note });
     }
     if (name === 'pingen_cancel_letter') {
       await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/cancel`, { json: { data: { id: lid, type: 'letters' } } });
@@ -517,12 +607,25 @@ const callTool = async req => {
       return text({ deleted: lid });
     }
     if (name === 'pingen_letter_events') {
-      const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/events?sort=-emitted_at`);
+      // The page size is asked for rather than left to the API. This tool was
+      // the first one taught that a page is not the whole list, and then
+      // pingen_list_letters was taught the same lesson better: when the answer
+      // carries neither a next link nor a total, a page that came back exactly
+      // full is the one piece of evidence left that there is more. That third
+      // branch was never brought back here — and it could not have been, because
+      // a caller that never says how big a page it wants cannot recognise a full
+      // one. So it says.
+      const d = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/events?page[limit]=${EVENT_PAGE}&sort=-emitted_at`);
       // One page, and it used to be handed over as the whole history. A letter
       // with a long tracking trail then looked like it had stopped moving.
       const events = (d.data || []).map(e => ({ type: e.attributes?.type || e.type, at: e.attributes?.emitted_at, detail: e.attributes?.data }));
-      const more = d.links?.next || (d.meta?.total != null && d.meta.total > events.length);
-      return text({ events, ...(more ? { truncated: true, hint: 'Pingen meldet weitere Ereignisse — dies ist die erste Seite' } : {}) });
+      const more = d.links?.next ? true
+        : d.meta?.total != null ? d.meta.total > events.length
+          : events.length >= EVENT_PAGE;
+      // Newest first, so what is missing is the old end of the trail — which is
+      // worth saying, because "the first page" alone reads like the beginning of
+      // the story rather than the end of it.
+      return text({ events, ...(more ? { truncated: true, hint: 'Pingen meldet weitere Ereignisse — dies ist nur die erste Seite, neueste zuerst; die ältesten Einträge fehlen' } : {}) });
     }
     if (name === 'pingen_download_letter') {
       const r = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/file`, { raw: true });

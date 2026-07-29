@@ -99,6 +99,13 @@ The exact service names read by `index.js` are:
 
 (`PINGEN_API_BASE` overrides the API base URL, default `https://api.pingen.com`.)
 
+The organisation UUID is optional only where there is nothing to choose: it is
+discovered automatically when the account has exactly one organisation, and
+asked for otherwise. "Exactly one" means one in the account, not one on the page
+that came back — an organisation list long enough to paginate is a question too,
+because picking the first entry off it would decide, silently, which account pays
+for and franks the letter.
+
 An environment variable that is **set** always wins — even when it is empty. A
 blank `PINGEN_CLIENT_SECRET` means *no secret*, not *go and look in the
 keychain*; a blank `PINGEN_API_BASE` means *no endpoint*, not *use production*.
@@ -163,7 +170,10 @@ accident:
    a letter is the safe direction.
 
 The only shortcut is passing `auto_send: true` to `pingen_send_letter`, which
-mails immediately without a review step — use deliberately.
+mails immediately without a review step — use deliberately. It also requires
+`delivery_product`: the product is optional on a draft only because
+`pingen_submit_letter` asks for one later, and `auto_send: true` is the single
+route that never reaches that call.
 
 A draft must reach status **`valid`** before it can be submitted. If Pingen
 still needs something (e.g. the address couldn't be read), the draft is
@@ -175,14 +185,14 @@ still needs something (e.g. the address couldn't be read), the draft is
 
 | Tool | Parameters | What it does / returns |
 | --- | --- | --- |
-| `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. |
+| `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. That list paginates too: if it is only a page, the result says `truncated: true`, and a configured `PINGEN_ORG_UUID` that is simply not on that page is no longer announced as belonging to no reachable organisation. |
 | `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. One page only: if Pingen has more, the result also carries `truncated: true` — so *"nothing went to that address"* is never concluded from a list that was never read to the end. |
-| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown rather than as a send. |
-| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. Returns the submitted letter row. |
+| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional for a draft, **required with `auto_send: true`**); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately; without a `delivery_product` that call is refused before anything is uploaded, because nothing asks for a product later and the letter would be franked however Pingen falls back. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown in both directions — neither as a send nor as "not a draft", because guessing the second shuts the two-step flow down just as confidently as guessing the first opens it. |
+| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. Returns the submitted letter row plus a note, and the note is decided by the status that came back rather than by the call having been accepted: Pingen answering 200 while leaving the letter in `action_required` is reported as **not** on its way, and a status this server does not recognise — or none at all — is reported as unknown rather than as a send. |
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |
 | `pingen_cancel_letter` | `letter_id` (required) | Cancels an already-submitted/sent letter where Pingen still allows it. Returns `{ cancelled: <id> }`. |
 | `pingen_delete_letter` | `letter_id` (required); **`confirm: true` (required)** | Deletes a draft / not-yet-sent letter for good. To stop a letter already on its way use `pingen_cancel_letter`. Returns `{ deleted: <id> }`. |
-| `pingen_letter_events` | `letter_id` (required) | Tracking/status history (created → submitted → sent → delivered → undeliverable …): `type`, `at`, `detail`. First page only; `truncated: true` when Pingen reports more, so a letter that is still moving is never read as one that has stopped. |
+| `pingen_letter_events` | `letter_id` (required) | Tracking/status history (created → submitted → sent → delivered → undeliverable …): `type`, `at`, `detail`. First page only, newest first; `truncated: true` when Pingen reports more — and also when it reports nothing at all and the page came back exactly full, which is the last evidence available that the trail was cut off. So a letter that is still moving is never read as one that has stopped. |
 | `pingen_download_letter` | `letter_id` (required); `output_path` (required) | Downloads the final letter PDF to `output_path` (available once processed/sent). Returns `{ saved, bytes }`. |
 
 ### Example
@@ -313,7 +323,9 @@ the mock, and a `security` stub that finds nothing goes first on `PATH`: **no
 test can reach the real API, the real login keychain, or the post**. Alongside
 the happy paths it pins the properties that matter — that `pingen_send_letter`
 creates a draft and submits nothing, that a non-boolean `auto_send` still yields
-a draft, that submitting is a `PATCH`, and that no token or client secret can
+a draft, that neither of the two calls that reach the post will do so without a
+`delivery_product`, that neither of them reports a send Pingen did not confirm,
+that submitting is a `PATCH`, and that no token or client secret can
 appear in a tool result or on stderr even when the upstream error body quotes it
 back. The gate fails below 90% line, 90% function and 80% branch coverage of
 `index.js`.
