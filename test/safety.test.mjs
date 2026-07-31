@@ -227,7 +227,9 @@ describe('nothing is mailed by accident', () => {
       assert.doesNotMatch(data.note, /Zum Senden: pingen_submit_letter/,
         `${st}: told the caller to post a letter Pingen had just refused: ${data.note}`);
       assert.match(data.note, new RegExp(st), `${st}: the note never said what Pingen answered: ${data.note}`);
-      assert.match(data.note, /pingen_get_letter/, `${st}: and did not say where to look`);
+      // It used to be pingen_get_letter that was named here, which is where a
+      // reader is sent to learn nothing at all: see the test below.
+      assert.match(data.note, /pingen_letter_events/, `${st}: and did not say where to look`);
       assert.equal(mock.state.submitted.length, 0, `${st}: something was submitted`);
     }
   });
@@ -243,6 +245,44 @@ describe('nothing is mailed by accident', () => {
       mock.state.nextStatus = null;
       assert.equal(data.created.status, st);
       assert.match(data.note, /Zum Senden: pingen_submit_letter/, `${st}: the ordinary path stopped saying what to do next: ${data.note}`);
+    }
+  });
+
+  test('the half that was told to mail it says so too when Pingen refuses', async () => {
+    // Three places branch on RESTING, not two: this note has an auto_send=false
+    // half and an auto_send=true half, and only the first was ever split. The
+    // second answered a PDF Pingen will not print with "NICHT versandt.
+    // Details: pingen_get_letter." — true as far as it goes, and silent about
+    // the letter having been refused, which leaves the two obvious next moves
+    // standing: submit it, or send the same PDF again. Both are exactly what
+    // the sibling branches now warn against, and this is the half where the
+    // caller has already said "put it in the post", so it is the half where the
+    // urge to try again is strongest. Neither attempt is billed for, which is
+    // how it survived three rounds of this: the letter that was meant to go out
+    // simply never goes, and nothing on the bill says so.
+    for (const st of ['action_required', 'invalid']) {
+      mock.state.nextStatus = st;
+      const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+      mock.state.nextStatus = null;
+      assert.equal(data.created.status, st, 'the fixture did answer with it');
+      assert.match(data.note, /NICHT versandt/, `${st}: stopped saying the letter did not go: ${data.note}`);
+      assert.match(data.note, new RegExp(st), `${st}: the note never said what Pingen answered: ${data.note}`);
+      assert.match(data.note, /korrigiertes PDF/, `${st}: never named the one thing that helps: ${data.note}`);
+    }
+  });
+
+  test('a letter auto_send has simply not moved yet is not called a refusal', async () => {
+    // The half that must not become collateral, the same way it was kept in the
+    // other two places: draft and valid are Pingen holding a letter it has not
+    // objected to, and answering those with "upload a corrected PDF" sends a
+    // caller off to redo a letter that was fine.
+    for (const st of ['draft', 'valid']) {
+      mock.state.nextStatus = st;
+      const { data } = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+      mock.state.nextStatus = null;
+      assert.equal(data.created.status, st);
+      assert.match(data.note, /NICHT versandt/, `${st}: stopped saying the letter did not go: ${data.note}`);
+      assert.doesNotMatch(data.note, /korrigiertes PDF/, `${st}: sent the caller off to redo a letter Pingen never objected to: ${data.note}`);
     }
   });
 
@@ -427,6 +467,61 @@ describe('nothing is mailed by accident', () => {
       assert.equal(data.letter.status, st);
       assert.match(data.note, /erneut senden/i, `${st}: stopped saying what to do next: ${data.note}`);
       assert.doesNotMatch(data.note, /korrigiertes PDF/, `${st}: sent the caller off to redo a letter Pingen never objected to: ${data.note}`);
+    }
+  });
+
+  test('a refused letter is told where the reason actually is', async () => {
+    // Every one of the three notes above ends by telling the reader to go and
+    // find out why, and every one of them used to send them to
+    // pingen_get_letter. That tool answers with letterRow and nothing else —
+    // id, status, delivery_product, recipient, tracking, pages, submitted,
+    // price — so whatever Pingen puts on the letter about the refusal, what
+    // comes back is the status the note has just quoted and not one word more.
+    // The reason is on the tracking trail, as a bare string, and
+    // pingen_letter_events has been handing it over as `detail` all along. So
+    // the note raised the one question that matters and pointed at the one tool
+    // in this server that structurally cannot answer it, and what reaches a
+    // human is "this letter needs action" with no way to learn what action —
+    // which is where a letter stops, because the next step is unknowable and
+    // nothing costs anything to leave undone.
+    //
+    // The same shape as "limit erhöhen (max 100)" told to a caller already at
+    // 100: advice that cannot be followed is followed once and then abandoned.
+    const trail = mock.state.eventTrail;
+    // Shaped like the real thing rather than like a test string: Pingen puts the
+    // refusal on the trail as a bare code in `data`, not as prose and not as a
+    // field on the letter. If that ever becomes an object the assertion below
+    // still holds, because it asks whether the answer contains the code at all.
+    const reason = 'layout_unsupported_format';
+    mock.state.eventTrail = [
+      ...trail,
+      { id: 'ev-refused', type: 'letter_events', attributes: { type: 'letter.validation_failed', emitted_at: '2026-07-01T09:45:00+00:00', data: reason } },
+    ];
+    try {
+      const refused = [];
+      for (const st of ['action_required', 'invalid']) {
+        mock.state.nextStatus = st;
+        const draft = await srv.call('pingen_send_letter', { file_path: pdf });
+        const auto = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+        mock.state.nextStatus = null;
+        mock.state.sendStatus = st;
+        const sent = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+        mock.state.sendStatus = null;
+        refused.push([`${st} on a draft`, draft.data.note, draft.data.created.id],
+          [`${st} on auto_send`, auto.data.note, auto.data.created.id],
+          [`${st} on submit`, sent.data.note, 'ltr-2']);
+      }
+      for (const [how, note, id] of refused) {
+        assert.match(note, /pingen_letter_events/, `${how}: never said where the reason is: ${note}`);
+        assert.doesNotMatch(note, /pingen_get_letter/, `${how}: sent the reader to the tool that cannot say why: ${note}`);
+        // And the tool it names does answer the question, which is the half
+        // that makes the other half worth asserting: a note may only send a
+        // caller somewhere the answer actually is.
+        const { raw } = await srv.call('pingen_letter_events', { letter_id: id });
+        assert.ok(raw.includes(reason), `${how}: the tool the note names had nothing to say either: ${raw}`);
+      }
+    } finally {
+      mock.state.eventTrail = trail;
     }
   });
 

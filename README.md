@@ -180,10 +180,19 @@ still needs something (e.g. the address couldn't be read), the draft is
 `action_required` and submit will fail — see *Troubleshooting*. `pingen_send_letter`
 says so on the spot: a letter that comes back `action_required` or `invalid` is
 reported as a draft Pingen will **not** take, with the status and where to look,
-and not with the usual "now submit it". `pingen_submit_letter` says the same
-thing about the same two statuses rather than "try again": a letter Pingen has
-refused does not become sendable by being sent a second time, and the note names
-the one step that helps — a corrected PDF.
+and not with the usual "now submit it" — on **both** of its halves, the draft one
+and `auto_send: true`, because a refused PDF is refused either way and the half
+that was told to mail it is the half most likely to be told to try again.
+`pingen_submit_letter` says the same thing about the same two statuses rather
+than "try again": a letter Pingen has refused does not become sendable by being
+sent a second time, and the note names the one step that helps — a corrected PDF.
+
+All three of those notes point at **`pingen_letter_events`** for the reason,
+because that is where Pingen keeps it: the letter itself carries the status and
+nothing about why, while the trail carries a bare code (`layout_unsupported_format`
+and the like). `pingen_get_letter` cannot answer that question — it returns the
+letter row — so being sent there is being told to look somewhere the answer has
+never been.
 
 ---
 
@@ -193,8 +202,8 @@ the one step that helps — a corrected PDF.
 | --- | --- | --- |
 | `pingen_status` | — | Verifies credentials; returns your organisations (`id`, `name`, `plan`, `status`) and the active org id. That list paginates too: if it is only a page, the result says `truncated: true`, and a configured `PINGEN_ORG_UUID` that is simply not on that page is no longer announced as belonging to no reachable organisation. |
 | `pingen_list_letters` | `limit` (number, 1–100, default 20) | Lists recent letters, newest first: `id`, `status`, `delivery_product`, `recipient`, `tracking`, `pages`, `submitted`, `price`. One page only: if Pingen has more, the result also carries `truncated: true` — so *"nothing went to that address"* is never concluded from a list that was never read to the end. |
-| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional for a draft, **required with `auto_send: true`**); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately; without a `delivery_product` that call is refused before anything is uploaded, because nothing asks for a product later and the letter would be franked however Pingen falls back. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown in both directions — neither as a send nor as "not a draft", because guessing the second shuts the two-step flow down just as confidently as guessing the first opens it. A resting status is not one answer either: `action_required` and `invalid` are Pingen refusing the PDF, so those are reported as a draft it will not take rather than as one waiting to be submitted. |
-| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. The result is decided by the status that came back rather than by the call having been accepted: only when Pingen says it has taken the letter is the row filed under `submitted`; otherwise it comes back as `letter` with a note saying so, so Pingen answering 200 while leaving it in `action_required` is reported as **not** on its way, and a status this server does not recognise — or none at all — is reported as unknown rather than as a send. Not every "still here" is the same either: `action_required` and `invalid` are Pingen refusing the PDF, so the note says a second attempt will not move the letter and points at a corrected PDF, while `draft` and `valid` still say to check the cause and send again. |
+| `pingen_send_letter` | `file_path` (required, absolute PDF path); `delivery_product` (optional for a draft, **required with `auto_send: true`**); `address_position` (`left`\|`right`, default `left`); `auto_send` (bool, default `false`) | Uploads the PDF and creates a letter. **DRAFT by default — nothing is mailed.** Returns the created letter row plus a note. Set `auto_send: true` to mail immediately; without a `delivery_product` that call is refused before anything is uploaded, because nothing asks for a product later and the letter would be franked however Pingen falls back. The note is decided by the status Pingen answered with and not by the flag that was sent, so a letter Pingen has already taken for printing is never reported as one still sitting there — and a status this server does not recognise, or an answer carrying none, is reported as unknown in both directions — neither as a send nor as "not a draft", because guessing the second shuts the two-step flow down just as confidently as guessing the first opens it. A resting status is not one answer either: `action_required` and `invalid` are Pingen refusing the PDF, so those are reported as a draft it will not take rather than as one waiting to be submitted — on both halves of the note, `auto_send: true` included, where "NICHT versandt" alone left the refusal unsaid and a second attempt looking sensible. The reason is named where it lives: `pingen_letter_events`. |
+| `pingen_submit_letter` | `letter_id` (required); `delivery_product` (required); **`confirm: true` (required)**; `print_mode` (`simplex`\|`duplex`, default `simplex`); `print_spectrum` (`color`\|`grayscale`, default `color`) | **Physically mails an existing draft, at your cost, with no undo.** Requires the letter to be `valid`. The result is decided by the status that came back rather than by the call having been accepted: only when Pingen says it has taken the letter is the row filed under `submitted`; otherwise it comes back as `letter` with a note saying so, so Pingen answering 200 while leaving it in `action_required` is reported as **not** on its way, and a status this server does not recognise — or none at all — is reported as unknown rather than as a send. Not every "still here" is the same either: `action_required` and `invalid` are Pingen refusing the PDF, so the note says a second attempt will not move the letter, points at `pingen_letter_events` for the reason and at a corrected PDF for the fix, while `draft` and `valid` still say to check the cause and send again. |
 | `pingen_get_letter` | `letter_id` (required) | Status/tracking of one letter (single letter row). |
 | `pingen_cancel_letter` | `letter_id` (required) | Cancels an already-submitted/sent letter where Pingen still allows it. Returns `{ cancelled: <id> }`. |
 | `pingen_delete_letter` | `letter_id` (required); **`confirm: true` (required)** | Deletes a draft / not-yet-sent letter for good. To stop a letter already on its way use `pingen_cancel_letter`. Returns `{ deleted: <id> }`. |
@@ -261,7 +270,7 @@ and check the address preview before submitting.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `action_required` / `protected_stamp_area` | Address outside the window, or something in the franking zone / a sender line inside the window | Reposition the recipient into the address window and clear the top ~40–60 mm (see *PDF layout gotcha*), re-upload. |
+| `action_required` / `protected_stamp_area` | Address outside the window, or something in the franking zone / a sender line inside the window | Reposition the recipient into the address window and clear the top ~40–60 mm (see *PDF layout gotcha*), re-upload. Which of them it was is on the letter's trail, not on the letter: `pingen_letter_events` shows the code Pingen rejected it with. |
 | `conflict_state` when submitting | The letter isn't `valid` yet (still a draft that needs work) | Fix the address issue so the draft reaches `valid`, then call `pingen_submit_letter`. Check state with `pingen_get_letter`. |
 | `Keine Pingen-Credentials …` / empty keychain | The `security` lookup returned nothing | Re-run the `security add-generic-password` commands with the exact service names, then verify with `security find-generic-password -a pingen -s pingen-mcp-client-id -w`. |
 | Token error (401/400 on `/auth/access-tokens`) | Wrong Client-ID/Secret, or the OAuth client isn't a `client_credentials` client | Recreate the OAuth client with the `client_credentials` grant and re-store the values. |
@@ -333,8 +342,10 @@ a draft, that neither of the two calls that reach the post will do so without a
 `delivery_product`, that neither of them reports a send Pingen did not confirm —
 in the note or in the key the letter is filed under — that a draft Pingen has
 flagged is never announced as ready to post and never answered with an
-instruction to send it again, by either of the two tools that see that status,
-that submitting is a `PATCH`, and that no token or client secret can
+instruction to send it again, by any of the three branches that see that status
+— the two halves of `pingen_send_letter` and `pingen_submit_letter` — that each
+of them names a tool that can actually say why the letter was refused, that
+submitting is a `PATCH`, and that no token or client secret can
 appear in a tool result or on stderr even when the upstream error body quotes it
 back. The gate fails below 90% line, 90% function and 80% branch coverage of
 `index.js`.
