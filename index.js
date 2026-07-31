@@ -397,6 +397,22 @@ const MOVING = new Set(['processing', 'sending', 'sent', 'delivered']);
 // one everybody hits, and it says in as many words that such a letter cannot be
 // submitted. The create note said the opposite. See the note at the branch.
 const BLOCKED = new Set(['action_required', 'invalid']);
+// Every one of those notes then told the reader to go and find out why, and
+// sent them to pingen_get_letter to do it. That tool hands back letterRow and
+// nothing else — id, status, delivery_product, recipient, tracking, pages,
+// submitted, price — and the reason a letter was refused is none of those, so
+// the call comes back with the status the note had just quoted and not one word
+// more, whatever Pingen puts on the letter. Pingen keeps the refusal on the
+// tracking trail instead, as a bare string like layout_unsupported_format or
+// protected_border_area, which pingen_letter_events already hands over as
+// `detail`. So "check the cause" was answered by the one tool in this server
+// that structurally cannot answer it, while the one that can went unnamed, and
+// what reaches a human is "this letter needs action" with no way to learn what
+// action. It is the same defect the truncation hint had — "limit erhöhen (max
+// 100)" told a caller already at the maximum to raise it — and it fails the
+// same way round: advice that cannot be followed gets followed anyway, once,
+// and then the letter is simply left sitting there.
+const WHY = 'pingen_letter_events (oder das Dashboard) — der Grund steht als Ereignis im Verlauf, nicht am Brief; bei action_required meist Adressfenster oder Frankierzone im PDF';
 
 // How much of a tracking trail to ask for in one go. A letter's history is a
 // handful of entries, so this is far more than any real one has — which is the
@@ -567,21 +583,34 @@ const callTool = async req => {
       // it said "not ready". The sibling half has said "NICHT versandt.
       // Details: pingen_get_letter." about those same two statuses since round
       // 15; this half was never given it.
+      //
+      // Nor did it afterwards. Round 18 went looking for "both places that
+      // branch on RESTING" and there are three: this note has two halves, and
+      // only the auto_send=false one was ever split. The half left behind is
+      // the one where the caller has already said "put this in the post", and a
+      // PDF Pingen will not print came back from it as "NICHT versandt.
+      // Details: pingen_get_letter." — true, and silent about the letter having
+      // been refused, so the obvious next move is the one the other two branches
+      // now spend a paragraph each warning against: submit it, or send the same
+      // PDF again. Nothing is billed for either, which is why it lasted: the
+      // letter that was meant to go out simply never goes.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
       const note = !attributes.auto_send
         ? BLOCKED.has(status)
-          ? `Entwurf erstellt, nichts versandt — aber Pingen meldet Status "${shown}" und nimmt den Brief so nicht zum Druck an. Ursache prüfen: pingen_get_letter oder das Dashboard (bei action_required meist Adressfenster oder Frankierzone im PDF), dann ein korrigiertes PDF hochladen. pingen_submit_letter bringt ihn in diesem Zustand nicht auf den Weg.`
+          ? `Entwurf erstellt, nichts versandt — aber Pingen meldet Status "${shown}" und nimmt den Brief so nicht zum Druck an. Ursache: ${WHY}. Dann ein korrigiertes PDF hochladen; pingen_submit_letter bringt ihn in diesem Zustand nicht auf den Weg.`
           : RESTING.has(status)
             ? 'DRAFT erstellt (nichts versandt). Zum Senden: pingen_submit_letter.'
             : MOVING.has(status)
               ? `auto_send=false, aber Pingen meldet Status "${shown}" — der Brief ist bereits zum Druck angenommen. NICHT mit pingen_submit_letter nachfassen, sonst geht er zweimal raus. Prüfen: pingen_get_letter.`
               : `auto_send=false, und Pingen meldet Status "${shown}" — den kennt dieser Server nicht; ob der Brief ein Entwurf ist oder schon läuft, sagt das nicht. Erst pingen_get_letter, dann entscheiden, ob pingen_submit_letter nötig ist — blind nachfassen kann ihn zweimal rausschicken.`
-        : RESTING.has(status)
-          ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt. Details: pingen_get_letter.`
-          : MOVING.has(status)
-            ? `auto_send=true, Pingen meldet Status "${shown}" → wird versandt.`
-            : `auto_send=true, Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter.`;
+        : BLOCKED.has(status)
+          ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt, und Pingen nimmt den Brief so auch nicht zum Druck an: derselbe Brief ein zweites Mal abgeschickt ändert daran nichts. Ursache: ${WHY}. Dann ein korrigiertes PDF hochladen.`
+          : RESTING.has(status)
+            ? `auto_send=true, aber Pingen meldet Status "${shown}" — NICHT versandt. Details: pingen_get_letter.`
+            : MOVING.has(status)
+              ? `auto_send=true, Pingen meldet Status "${shown}" → wird versandt.`
+              : `auto_send=true, Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter.`;
       return text({ created: letterRow(d.data), note });
     }
     if (name === 'pingen_submit_letter') {
@@ -640,14 +669,16 @@ const callTool = async req => {
       // refusal got asked for again. This branch is the one being read at the
       // moment it matters, because it is the answer to the call that was meant
       // to put the letter in the post — and the retry it recommends is free, so
-      // there is no bill to notice that the letter never went.
+      // there is no bill to notice that the letter never went. Where the reason
+      // for the refusal is actually kept, and why this note no longer sends
+      // anyone to pingen_get_letter to look for it, is at WHY.
       const status = d.data?.attributes?.status;
       const shown = status ?? 'keinen';
       const accepted = MOVING.has(status);
       const note = accepted
         ? `Pingen meldet Status "${shown}" — zum Druck angenommen, der Brief geht raus.`
         : BLOCKED.has(status)
-          ? `Pingen meldet Status "${shown}" — der Brief ist NICHT unterwegs, und Pingen nimmt ihn in diesem Zustand auch nicht zum Druck an: ein zweiter Aufruf von pingen_submit_letter bringt ihn so nicht auf den Weg. Ursache prüfen: pingen_get_letter oder das Dashboard (bei action_required meist Adressfenster oder Frankierzone im PDF), dann ein korrigiertes PDF mit pingen_send_letter hochladen.`
+          ? `Pingen meldet Status "${shown}" — der Brief ist NICHT unterwegs, und Pingen nimmt ihn in diesem Zustand auch nicht zum Druck an: ein zweiter Aufruf von pingen_submit_letter bringt ihn so nicht auf den Weg. Ursache: ${WHY}. Dann ein korrigiertes PDF mit pingen_send_letter hochladen.`
           : RESTING.has(status)
             ? `Pingen meldet Status "${shown}" — der Brief liegt weiterhin bei Pingen und ist NICHT unterwegs. Ursache prüfen: pingen_get_letter, danach erneut senden.`
             : `Pingen meldet Status "${shown}" — ob der Brief unterwegs ist, sagt das nicht. Prüfen: pingen_get_letter, und nicht blind ein zweites Mal senden.`;
