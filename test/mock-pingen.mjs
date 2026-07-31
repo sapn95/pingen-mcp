@@ -85,6 +85,16 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // exactly full being the last evidence available. This is how that case is
     // put to the events tool as well.
     eventsQuiet: false,
+    // Do the work and then answer nothing at all: 'send' or 'create' kills the
+    // connection once the letter has been taken for printing, with no status,
+    // no body and nothing to branch on. Every other hostile case here is an
+    // answer that says the wrong thing; this is the one where there is no
+    // answer, and it is the only shape in which a call that has already put
+    // paper in the post looks to the caller exactly like one that never
+    // arrived. A real network does it with a timeout, a proxy that gives up, or
+    // a socket dropped mid-body; the effect on fetch() is the same and this is
+    // the fast, deterministic way to reach it.
+    dropAnswer: null,
     // Set to a promise to hold the letter that fails loudly open, so a second
     // call can overtake it while its response is still on the way back.
     holdLeak: null,
@@ -136,6 +146,10 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       req.on('data', c => chunks.push(c));
       req.on('end', () => resolve(Buffer.concat(chunks)));
     });
+    // The work is already done when this runs — see dropAnswer. Nothing is
+    // written back at all, so the caller gets a dead connection rather than a
+    // status it could reason about.
+    const dropAnswer = () => { res.socket?.destroy(); };
 
     // --- OAuth2 client_credentials ------------------------------------------
     if (p === '/auth/access-tokens') {
@@ -237,6 +251,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         });
         if (state.omitStatus) delete created.attributes.status;
         state.letters.push(created);
+        // Created, and with auto_send=true already on its way — and the caller
+        // is about to be told nothing at all.
+        if (state.dropAnswer === 'create') return dropAnswer();
         return send(201, { data: created });
       }
       return send(405, { error: 'method_not_allowed' });
@@ -271,6 +288,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       state.submitted.push({ id, attributes: body.data?.attributes || {} });
       known.attributes = { ...known.attributes, ...body.data?.attributes, status: state.sendStatus || 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
       if (state.omitSendStatus) delete known.attributes.status;
+      // Taken for printing, and then the line goes dead. The letter is in the
+      // post and the tool that put it there is about to hear nothing back.
+      if (state.dropAnswer === 'send') return dropAnswer();
       return send(200, { data: known });
     }
     if (tail === 'cancel') {
