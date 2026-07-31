@@ -57,6 +57,20 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     deleted: [],
     uploadStatus: 200,    // flip to fail the PUT of the bytes
     slotBroken: false,    // flip to hand out a slot without a URL
+    // What the file route labels the letter's bytes with. A media type is
+    // case-insensitive, and a store handing out a signed object is as likely to
+    // call it a plain byte stream as a PDF, so the tool sniffs for both — and
+    // this mock only ever said `application/pdf`, in that one spelling. The
+    // round that fixed a download rejecting `Application/PDF` as JSON wrote in
+    // the same breath that the mock could only ever send lowercase, and then
+    // left it saying so: the fold it added was never once exercised, and taking
+    // it back out left all 101 tests green while an upper-case answer came back
+    // as "Unexpected token '%'". Every other fixture that was named as the
+    // reason a defect could not be seen here was taught the hostile shape in the
+    // same commit — the sort order, the upload's content type, a token that gets
+    // revoked, a create that answers with no status. This is the one that was
+    // diagnosed and not fitted.
+    fileContentType: 'application/pdf',
     // A real authorisation server hands out a different bearer every time and
     // says how long it lasts. Answering with one constant token for ever meant
     // a server that had lost track of a token it used to hold looked exactly
@@ -343,7 +357,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (tail === 'file' && req.method === 'GET') {
       // Three shapes the API is known to answer with, all of which the tool
       // has to cope with: the bytes, a pointer to them, or neither.
-      if (id === 'ltr-1') return send(200, Buffer.from('%PDF-1.4 direct-bytes'), 'application/pdf');
+      if (id === 'ltr-1') return send(200, Buffer.from('%PDF-1.4 direct-bytes'), state.fileContentType);
       if (id === 'ltr-2') return send(200, { data: { attributes: { url: `${base}/blob/${id}.pdf` } } }, 'application/json');
       return send(200, { data: { attributes: {} } }, 'application/json');
     }
