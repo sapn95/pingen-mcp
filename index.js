@@ -232,7 +232,24 @@ function letterId(v) {
 }
 
 async function api(method, path, { json, raw, retry = true } = {}) {
-  const bearer = await accessToken();
+  // Everything up to the fetch below is work this process does on its own, so a
+  // failure here is the one kind that provably never reached Pingen: no
+  // credentials in env or keychain, a grant the token endpoint refused, a base
+  // that is set but empty. It is marked as such because mailing() cannot tell
+  // it apart otherwise — an error with no status on it was read there as "the
+  // request may have got through", and that is true of a dropped connection and
+  // false of a missing client secret. "Keine Pingen-Credentials" therefore came
+  // back with a paragraph about a letter that might be in the post, over a call
+  // that had not sent a single byte, on the most common misconfiguration this
+  // server has. Noise on the one warning that has to be believed.
+  let bearer, url;
+  try {
+    bearer = await accessToken();
+    url = apiUrl(path);
+  } catch (e) {
+    e.beforeRequest = true;
+    throw e;
+  }
   // This is the bearer that can come back quoted, so it stays known to the
   // redactor until the tool call that used it has been answered — see
   // pinForCall. Pinning it for the length of the request was not enough.
@@ -240,7 +257,7 @@ async function api(method, path, { json, raw, retry = true } = {}) {
   const headers = { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.api+json' };
   let bodyInit;
   if (json !== undefined) { headers['Content-Type'] = 'application/vnd.api+json'; bodyInit = JSON.stringify(json); }
-  const r = await http(`${method} ${path}`, apiUrl(path), { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
+  const r = await http(`${method} ${path}`, url, { method, headers, body: bodyInit, timeout: raw ? TRANSFER_TIMEOUT_MS : TIMEOUT_MS });
   // A 401 means the request was refused before it did anything, so retrying it
   // once with a fresh token is safe even for a mutation — and it is the
   // difference between a revoked token costing one call and costing every call
@@ -251,13 +268,32 @@ async function api(method, path, { json, raw, retry = true } = {}) {
     return await api(method, path, { json, raw, retry: false });
   }
   if (!r.ok) {
-    // Marked, because a failure with a status on it is a failure Pingen has
-    // described: 404 says the letter is not there, 409 that it was not in a
-    // state to send. That is the one kind of error the warning below must not
-    // be glued to. See mailing().
-    const answered = new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
-    answered.answered = true;
-    throw answered;
+    // Marked, because a failure with a status on it is usually a failure Pingen
+    // has described: 404 says the letter is not there, 409 that it was not in a
+    // state to send. That is the kind of error the warning below must not be
+    // glued to. See mailing().
+    //
+    // Usually, and the exception is the whole reason that warning exists. A
+    // status is not a signature: 502, 503 and 504 are written by whatever sits
+    // in front of the API — a gateway, a proxy, a load balancer — and every one
+    // of them means "I forwarded this and could not get an answer back". They
+    // say nothing about what the origin did with it, so they cover the letter
+    // that was taken for printing exactly as well as the letter that was not.
+    // A 500 is the same shape one box further in: "something broke while I was
+    // handling this", not "I did nothing". Reading any of the four as Pingen's
+    // account of what happened put a bare "PATCH …/send → 502" in front of a
+    // caller whose letter was already printing — which is precisely the
+    // "nothing happened, send it again" this whole mechanism was built to stop,
+    // reached through a status instead of through silence.
+    //
+    // So the line is drawn where the answer stops being the API's own: below
+    // 500 it is, and every one of those means the request was stopped rather
+    // than acted on — a gateway that blocks a request answers 403 or 404 and
+    // never forwards it. At 500 and above nothing is known, and the wrapper
+    // treats it like the dropped connection it is.
+    const failed = new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
+    if (r.status < 500) failed.answered = true;
+    throw failed;
   }
   if (raw) return r;
   const txt = await r.text();
@@ -283,14 +319,24 @@ async function api(method, path, { json, raw, retry = true } = {}) {
 // name the tool that can settle it — pingen_get_letter for a submit, where the
 // id is in hand, and pingen_list_letters for a create, where it is not, because
 // the answer that would have carried the id is precisely what went missing.
-// An error that did come back with a status is left exactly as it was: a
-// warning on every 404 is noise, and noise is how the real one gets read past.
+//
+// Two things settle it, and only those two, because the warning is worth
+// nothing if it is worth ignoring. Pingen answering for itself settles it: a
+// 404, a 409, anything below 500 says the request was stopped and no paper
+// moved. Never having sent the request settles it too, in the same direction —
+// a missing client secret or a refused grant is a failure this process reached
+// on its own, and the line above it was never even opened. Everything else is
+// genuinely unknown: silence, and — this is the one that was being read as an
+// answer — a 5xx, which is a gateway or a broken handler saying it cannot tell
+// us either. Those get the warning; the other two are left exactly as they are,
+// because a warning glued to every 404 and every typo in a credential is the
+// noise that gets the real one read past.
 const MAYBE_POSTED = 'ob der Brief trotzdem raus ist, sagt dieser Fehler NICHT — die Anfrage kann Pingen erreicht und den Druck ausgelöst haben, bevor die Antwort verloren ging';
 async function mailing(check, run) {
   try {
     return await run();
   } catch (e) {
-    if (e.answered) throw e;
+    if (e.answered || e.beforeRequest) throw e;
     throw new Error(`${e.message} — ${MAYBE_POSTED}. ${check}`, { cause: e });
   }
 }

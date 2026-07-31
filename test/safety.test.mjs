@@ -39,13 +39,17 @@ esac`}
   return { path: `${dir}:${process.env.PATH}`, asked: () => (existsSync(log) ? readFileSync(log, 'utf8') : '') };
 }
 
-// Puts the mock back to answering after a test has had it hang up mid-call.
-// Kept as a function and called from a `finally`, so a failed assertion cannot
-// leave every later test in the file talking to a server that drops the line —
-// and so the flip back, which happens after an await, is not read as racing
-// with the counters the same test took off the mock beforehand. The suite runs
-// one call at a time.
-const answersAgain = () => { mock.state.dropAnswer = null; };
+// Puts the mock back to answering for itself after a test has had it hang up
+// mid-call or hide behind a gateway. Kept as a function and called from a
+// `finally`, so a failed assertion cannot leave every later test in the file
+// talking to a server that drops the line — and so the flip back, which happens
+// after an await, is not read as racing with the counters the same test took
+// off the mock beforehand. The suite runs one call at a time.
+// The status goes back too, and from in here rather than from the test that
+// changed it, for the same reason the rest of it does: written out at the call
+// site it is an assignment made after an await, which is exactly the shape that
+// cannot be shown to be safe from the outside.
+const answersAgain = () => { mock.state.dropAnswer = null; mock.state.gatewayAfter = null; mock.state.gatewayStatus = 502; };
 
 before(async () => {
   mock = await start();
@@ -618,6 +622,82 @@ describe('nothing is mailed by accident', () => {
     }
     assert.ok(draft.isError);
     assert.doesNotMatch(draft.raw, /zweimal raus/, `warned about the post over a draft: ${draft.raw}`);
+  });
+
+  test('a gateway status over a letter Pingen already took is not read as a send that failed', async () => {
+    // "A failure that came back with a status is a failure Pingen described" is
+    // true of the statuses Pingen writes and false of the ones it does not. A
+    // 502 is written by whatever sits in front of the API — a gateway, a proxy,
+    // a load balancer — and it means one thing only: "I forwarded this and
+    // could not get an answer back". The origin took the letter for printing on
+    // the far side of that sentence just as easily as it did nothing at all, so
+    // reading it as an account of what happened is the same guess the round
+    // before was spent removing, arrived at through a status instead of through
+    // silence. And it is the guess in the expensive direction: a bare
+    // "PATCH …/send → 502" reads as a call that failed, and the next move after
+    // a call that failed is to make it again.
+    const before = mock.state.submitted.length;
+    mock.state.gatewayAfter = 'send';
+    let out;
+    try {
+      out = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    } finally {
+      answersAgain();
+    }
+    const { raw, isError } = out;
+    // The premise, asserted first for the same reason as above: a regression
+    // here has to read as a letter in the post nobody was told about, not as a
+    // broken fixture.
+    assert.equal(mock.state.submitted.length, before + 1, 'the fixture did take the letter for printing');
+    assert.ok(isError, 'the call did fail');
+    assert.match(raw, /502/, 'the status is still reported');
+    assert.match(raw, /pingen_get_letter/, `never named the tool that can settle it: ${raw}`);
+    assert.match(raw, /zweimal raus/, `a gateway's patience was read as Pingen's answer: ${raw}`);
+  });
+
+  test('a gateway status over an auto_send create says the letter may exist anyway', async () => {
+    // The same status on the other call that mails, where it is worse for the
+    // same reason silence is: the retry collides with nothing, it uploads the
+    // PDF again and Pingen mails the second letter on its own.
+    const before = mock.state.created.length;
+    mock.state.gatewayAfter = 'create';
+    mock.state.gatewayStatus = 504;
+    let out;
+    try {
+      out = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+    } finally {
+      answersAgain();
+    }
+    const { raw, isError } = out;
+    assert.equal(mock.state.created.length, before + 1, 'the fixture did create it');
+    assert.equal(mock.state.created.at(-1).auto_send, true, 'and it was the mailing half');
+    assert.ok(isError);
+    assert.match(raw, /pingen_list_letters/, `never named a way to check without an id: ${raw}`);
+    assert.match(raw, /zweimal raus/, `a gateway's patience was read as Pingen's answer: ${raw}`);
+  });
+
+  test('a submit that never sent a request is not reported as a maybe-posted letter', async () => {
+    // The mirror image, and the reason the warning has to stay rare to stay
+    // worth reading. It fired on any error carrying no status, and a failure
+    // this process reaches on its own carries none either: a missing client
+    // secret, a grant the token endpoint refused, a base that is set but empty.
+    // Nothing has left the machine in any of those, and the most ordinary of
+    // them — no credentials configured — came back with a paragraph about a
+    // letter that might be printing and an instruction to go and check. Told
+    // that on their first run, the reader learns the paragraph means nothing,
+    // and it is the same paragraph that has to be believed on the day a
+    // connection really does die mid-send.
+    const quiet = await start();
+    const s = await startServer({ PINGEN_API_BASE: quiet.base, PINGEN_CLIENT_SECRET: '' });
+    const { raw, isError } = await s.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    const calls = [...quiet.state.calls];
+    await s.stop();
+    await quiet.close();
+    assert.ok(isError);
+    assert.equal(calls.length, 0, `the premise: it never called out at all, but did: ${calls}`);
+    assert.match(raw, /Keine Pingen-Credentials/, `the actual fault is still what the message says: ${raw}`);
+    assert.doesNotMatch(raw, /trotzdem raus/, `cried wolf over a request that was never sent: ${raw}`);
+    assert.doesNotMatch(raw, /zweimal raus/, `and told the reader not to retry a call that never happened: ${raw}`);
   });
 
   test('a token revoked mid-session costs one retry, not a second letter', async () => {

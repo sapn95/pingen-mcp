@@ -95,6 +95,15 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // a socket dropped mid-body; the effect on fetch() is the same and this is
     // the fast, deterministic way to reach it.
     dropAnswer: null,
+    // The same work, and then an answer that is not the API's. A gateway in
+    // front of Pingen forwards the request, the origin takes the letter for
+    // printing, and the reply is slower than the gateway's patience — so what
+    // comes back is a 502 the handler never wrote. The trap is that there IS a
+    // status here: dropAnswer is obviously nothing to go on, and this looks
+    // exactly like Pingen's own account of what happened while being an account
+    // of nothing but the gateway's patience. 'send' or 'create', like above.
+    gatewayAfter: null,
+    gatewayStatus: 502,
     // Set to a promise to hold the letter that fails loudly open, so a second
     // call can overtake it while its response is still on the way back.
     holdLeak: null,
@@ -150,6 +159,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // written back at all, so the caller gets a dead connection rather than a
     // status it could reason about.
     const dropAnswer = () => { res.socket?.destroy(); };
+    // Written by the box in front, not by the handler, and it says so: the body
+    // is the HTML error page a gateway serves, nothing the API would ever emit.
+    const gatewayAnswer = () => send(state.gatewayStatus, `<html><head><title>${state.gatewayStatus}</title></head><body>${state.gatewayStatus} Gateway</body></html>`, 'text/html');
 
     // --- OAuth2 client_credentials ------------------------------------------
     if (p === '/auth/access-tokens') {
@@ -252,8 +264,10 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         if (state.omitStatus) delete created.attributes.status;
         state.letters.push(created);
         // Created, and with auto_send=true already on its way — and the caller
-        // is about to be told nothing at all.
+        // is about to be told nothing at all, or told 502 by something that
+        // never saw the letter.
         if (state.dropAnswer === 'create') return dropAnswer();
+        if (state.gatewayAfter === 'create') return gatewayAnswer();
         return send(201, { data: created });
       }
       return send(405, { error: 'method_not_allowed' });
@@ -288,9 +302,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       state.submitted.push({ id, attributes: body.data?.attributes || {} });
       known.attributes = { ...known.attributes, ...body.data?.attributes, status: state.sendStatus || 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
       if (state.omitSendStatus) delete known.attributes.status;
-      // Taken for printing, and then the line goes dead. The letter is in the
-      // post and the tool that put it there is about to hear nothing back.
+      // Taken for printing, and then the line goes dead — or a gateway answers
+      // in the handler's place. Either way the letter is in the post and the
+      // tool that put it there is about to hear nothing that says so.
       if (state.dropAnswer === 'send') return dropAnswer();
+      if (state.gatewayAfter === 'send') return gatewayAnswer();
       return send(200, { data: known });
     }
     if (tail === 'cancel') {
