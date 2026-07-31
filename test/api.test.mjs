@@ -459,6 +459,40 @@ describe('downloads', () => {
     assert.equal(statSync(p).mode & 0o777, 0o600, `saved as ${(statSync(p).mode & 0o777).toString(8)}`);
   });
 
+  test('an upper-case media type is still a PDF, not JSON', async () => {
+    // Media types are case-insensitive, so `Application/PDF` is exactly as valid
+    // a label as the lowercase spelling. Read literally it went down the pointer
+    // branch instead, where the letter's own bytes were handed to JSON.parse and
+    // came back as `Unexpected token '%'` — a download that failed on a perfectly
+    // good answer. That was found and fixed rounds ago, and the commit that fixed
+    // it said the mock could only ever send lowercase. It still could, so nothing
+    // has been holding the fold in place since: stripping it left every test here
+    // green. Both spellings are asked for now.
+    const p = join(out, 'upper.pdf');
+    mock.state.fileContentType = 'Application/PDF';
+    const { data, raw, isError } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: p });
+    mock.state.fileContentType = 'application/pdf';
+    assert.ok(!isError, `an upper-case media type was not read as a PDF: ${raw}`);
+    assert.equal(data.saved, p);
+    assert.match(readFileSync(p, 'utf8'), /direct-bytes/);
+  });
+
+  test('a letter labelled as a plain byte stream is still a PDF', async () => {
+    // The other half of the same sniff, and it had never been sent either: a
+    // store that hands out a signed object commonly labels it
+    // application/octet-stream, and this branch existed on trust alone — the
+    // mock had no route that answered with anything but application/pdf, so
+    // deleting the clause would have cost nothing here and a real download of
+    // that shape would have been JSON.parsed and refused.
+    const p = join(out, 'octets.pdf');
+    mock.state.fileContentType = 'application/octet-stream';
+    const { data, raw, isError } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: p });
+    mock.state.fileContentType = 'application/pdf';
+    assert.ok(!isError, `a byte stream was not read as a PDF: ${raw}`);
+    assert.equal(data.saved, p);
+    assert.match(readFileSync(p, 'utf8'), /direct-bytes/);
+  });
+
   test('follows the pointer when the API answers with a URL instead', async () => {
     const p = join(out, 'pointer.pdf');
     await srv.call('pingen_download_letter', { letter_id: 'ltr-2', output_path: p });
