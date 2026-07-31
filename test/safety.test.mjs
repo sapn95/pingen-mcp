@@ -39,6 +39,14 @@ esac`}
   return { path: `${dir}:${process.env.PATH}`, asked: () => (existsSync(log) ? readFileSync(log, 'utf8') : '') };
 }
 
+// Puts the mock back to answering after a test has had it hang up mid-call.
+// Kept as a function and called from a `finally`, so a failed assertion cannot
+// leave every later test in the file talking to a server that drops the line —
+// and so the flip back, which happens after an await, is not read as racing
+// with the counters the same test took off the mock beforehand. The suite runs
+// one call at a time.
+const answersAgain = () => { mock.state.dropAnswer = null; };
+
 before(async () => {
   mock = await start();
   out = mkdtempSync(join(tmpdir(), 'pingen-safety-'));
@@ -532,6 +540,84 @@ describe('nothing is mailed by accident', () => {
     const { data } = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
     assert.equal(data.submitted.status, 'processing', `the earned receipt went missing: ${JSON.stringify(data)}`);
     assert.match(data.note, /geht raus/, `a genuine send was hedged: ${JSON.stringify(data)}`);
+  });
+
+  test('a submit whose answer never came back is not reported as a letter that stayed put', async () => {
+    // Everything above this line is about reading an answer correctly: the two
+    // status lists, the three notes, the key the row is filed under. None of it
+    // covers the call that gets no answer at all, and that is the one that
+    // costs. The PATCH reaches Pingen, Pingen takes the letter for printing,
+    // and the connection dies before a byte of the reply arrives — a timeout, a
+    // proxy giving up, a socket dropped mid-body all land here. What the tool
+    // handed over was "PATCH …/send: fetch failed", which reads exactly like a
+    // call that never got there, and the obvious next move after a call that
+    // never got there is to make it again. That is the second letter: printed,
+    // franked, posted, charged, no undo — arrived at through the only path with
+    // no status to branch on.
+    const before = mock.state.submitted.length;
+    mock.state.dropAnswer = 'send';
+    // Restored in a finally: a failed assertion below would otherwise leave the
+    // mock answering nothing to every later test in the file.
+    let out;
+    try {
+      out = await srv.call('pingen_submit_letter', { letter_id: 'ltr-2', delivery_product: 'fast', confirm: true });
+    } finally {
+      answersAgain();
+    }
+    const { raw, isError } = out;
+    // The premise first: this is not a call that failed to arrive. Asserted the
+    // other way round, a regression reads like a broken fixture rather than a
+    // letter in the post that nobody was told about.
+    assert.equal(mock.state.submitted.length, before + 1, 'the fixture did take the letter for printing');
+    assert.ok(isError, 'the call did fail');
+    assert.match(raw, /pingen_get_letter/, `never named the tool that can settle it: ${raw}`);
+    assert.match(raw, /zweimal raus/, `left "send it again" looking like the obvious next move: ${raw}`);
+  });
+
+  test('a create that mails and never answers says the letter may exist anyway', async () => {
+    // The same silence on the shortcut, and worse there: a retry does not
+    // collide with anything, it uploads the same PDF again and creates a second
+    // letter that Pingen mails on its own. The id that would let anyone check
+    // is in the answer that went missing, so the note has to name the tool that
+    // works without one.
+    const before = mock.state.created.length;
+    mock.state.dropAnswer = 'create';
+    let out;
+    try {
+      out = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+    } finally {
+      answersAgain();
+    }
+    const { raw, isError } = out;
+    assert.equal(mock.state.created.length, before + 1, 'the fixture did create it with auto_send');
+    assert.equal(mock.state.created.at(-1).auto_send, true, 'and it was the mailing half');
+    assert.ok(isError);
+    assert.match(raw, /pingen_list_letters/, `never named a way to check without an id: ${raw}`);
+    assert.match(raw, /zweimal raus/, `left uploading the same PDF again looking harmless: ${raw}`);
+  });
+
+  test('a failure Pingen did describe is not dressed up as a maybe-posted letter', async () => {
+    // The other half, and the reason this is not simply glued onto every error:
+    // a failure that came back with a status carries Pingen's own account of
+    // what happened — 404 says the letter is not there, so nothing was printed
+    // and nothing needs checking. A warning on those is noise, and noise is how
+    // the real one gets read past. The draft half of the create is here for the
+    // same reason: it is the most common call in the server, nothing it does
+    // reaches the post, and a lost answer there costs an orphan draft.
+    const answered = await srv.call('pingen_submit_letter', { letter_id: 'no-such-letter', delivery_product: 'fast', confirm: true });
+    assert.ok(answered.isError);
+    assert.match(answered.raw, /404/, `the fixture did answer with a status: ${answered.raw}`);
+    assert.doesNotMatch(answered.raw, /zweimal raus/, `cried wolf over a letter Pingen never had: ${answered.raw}`);
+
+    mock.state.dropAnswer = 'create';
+    let draft;
+    try {
+      draft = await srv.call('pingen_send_letter', { file_path: pdf });
+    } finally {
+      answersAgain();
+    }
+    assert.ok(draft.isError);
+    assert.doesNotMatch(draft.raw, /zweimal raus/, `warned about the post over a draft: ${draft.raw}`);
   });
 
   test('a token revoked mid-session costs one retry, not a second letter', async () => {

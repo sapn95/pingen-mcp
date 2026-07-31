@@ -250,10 +250,49 @@ async function api(method, path, { json, raw, retry = true } = {}) {
     token = null; tokenExp = 0;
     return await api(method, path, { json, raw, retry: false });
   }
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
+  if (!r.ok) {
+    // Marked, because a failure with a status on it is a failure Pingen has
+    // described: 404 says the letter is not there, 409 that it was not in a
+    // state to send. That is the one kind of error the warning below must not
+    // be glued to. See mailing().
+    const answered = new Error(`${method} ${path} → ${r.status}: ${excerpt(await r.text(), 500)}`);
+    answered.answered = true;
+    throw answered;
+  }
   if (raw) return r;
   const txt = await r.text();
   return txt ? JSON.parse(txt) : {};
+}
+
+// Every status the two mailing tools branch on comes out of an answer, and the
+// whole apparatus above it — the two lists, the three notes, the key the row is
+// filed under — exists so that no answer is read as a send it was not. None of
+// it covers the case where there is no answer at all, and that case is the
+// expensive one. The PATCH goes out, Pingen takes the letter for printing, and
+// the connection dies before a byte of the reply comes back — a timeout, a
+// proxy that gives up, a socket dropped mid-body. What the caller is handed is
+// "PATCH …/send: fetch failed", which reads exactly like a call that never got
+// there, so the obvious next move is to send it again. That is the second
+// letter: printed, franked, posted, charged, and no undo — the one direction
+// this server exists to prevent, reached through the only path that has no
+// status to branch on. It is worse on the shortcut, where a retry does not even
+// collide with an existing letter: it uploads the same PDF again and creates a
+// second one that Pingen mails on its own.
+//
+// So the two calls that put paper in the post say what they do not know, and
+// name the tool that can settle it — pingen_get_letter for a submit, where the
+// id is in hand, and pingen_list_letters for a create, where it is not, because
+// the answer that would have carried the id is precisely what went missing.
+// An error that did come back with a status is left exactly as it was: a
+// warning on every 404 is noise, and noise is how the real one gets read past.
+const MAYBE_POSTED = 'ob der Brief trotzdem raus ist, sagt dieser Fehler NICHT — die Anfrage kann Pingen erreicht und den Druck ausgelöst haben, bevor die Antwort verloren ging';
+async function mailing(check, run) {
+  try {
+    return await run();
+  } catch (e) {
+    if (e.answered) throw e;
+    throw new Error(`${e.message} — ${MAYBE_POSTED}. ${check}`, { cause: e });
+  }
 }
 
 // Discovered once and remembered, and — like the token — looked up only once
@@ -544,7 +583,16 @@ const callTool = async req => {
         auto_send: args.auto_send === true,
       };
       if (args.delivery_product) attributes.delivery_product = args.delivery_product;
-      const d = await api('POST', `/organisations/${org}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
+      const post = () => api('POST', `/organisations/${org}/deliveries/letters`, { json: { data: { type: 'letters', attributes } } });
+      // Only the half that mails. A draft creation that dies on the way leaves
+      // at worst an orphan draft nobody paid for, and a warning on the most
+      // common call in the server would be the noise that gets the real one
+      // read past. With auto_send=true the same silence is a letter that may
+      // already be printing, and the retry that follows a bare "fetch failed"
+      // uploads the PDF again and creates a second one beside it.
+      const d = attributes.auto_send
+        ? await mailing('Erst pingen_list_letters prüfen (neueste zuerst) — der Brief kann bereits angelegt und zum Druck angenommen sein — und nicht blind dasselbe PDF ein zweites Mal hochladen, sonst geht er zweimal raus.', post)
+        : await post();
       // The note used to repeat the flag we sent, and half of it still did. The
       // auto_send=true half was taught to read Pingen's status back, but as a
       // denylist of three names: every other answer — a status this code had
@@ -629,7 +677,12 @@ const callTool = async req => {
         return text({ refused: 'delivery_product ist erforderlich', note: 'z. B. cheap (B-Post), fast (A-Post), registered (Einschreiben)' });
       }
       const attributes = { delivery_product: args.delivery_product, print_mode: args.print_mode || 'simplex', print_spectrum: args.print_spectrum || 'color' };
-      const d = await api('PATCH', `/organisations/${await oid()}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } });
+      const org = await oid();
+      // The call whose whole purpose is to print and post, so a failure with no
+      // answer behind it may not read here as a letter that stayed put. See
+      // mailing().
+      const d = await mailing(`Erst pingen_get_letter ${lid} prüfen — status und tracking sagen, ob er unterwegs ist — und nicht blind ein zweites Mal senden, sonst geht er zweimal raus.`,
+        () => api('PATCH', `/organisations/${org}/deliveries/letters/${lid}/send`, { json: { data: { id: lid, type: 'letters', attributes } } }));
       // "submitted" used to be the whole answer, and it was concluded from the
       // PATCH having come back 2xx — that is, from the request we made rather
       // than from the answer we got. Twice now that same reasoning has been
