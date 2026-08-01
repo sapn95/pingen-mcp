@@ -217,6 +217,27 @@ describe('reading', () => {
     assert.equal(data.organisations[0].plan, 'free');
   });
 
+  test('a full page of organisations with no metadata is still not all of them', async () => {
+    // The third branch of the same three, and it has to be read here rather
+    // than on the send path: there the refusal fires on `orgs.length > 1`
+    // alone, so a full page triggers it whether or not anything noticed the
+    // page was full. Status is where the count is allowed to be large and the
+    // truncation still has to be said out loud.
+    const org = (i) => ({ id: `org-${String(i).padStart(3, '0')}`, type: 'organisations', attributes: { name: `Example ${i}` } });
+    for (const [n, truncated] of [[101, true], [50, undefined]]) {
+      const p = await start();
+      p.state.orgs = Array.from({ length: n }, (_, i) => org(i));
+      p.state.orgPageMax = 100;   // ORG_PAGE, so the page can come back exactly full
+      p.state.orgQuiet = true;
+      const s = await startServer({ PINGEN_API_BASE: p.base, PINGEN_ORG_UUID: 'org-000' });
+      const { data } = await s.call('pingen_status');
+      await s.stop();
+      await p.close();
+      assert.equal(data.organisations.length, Math.min(n, 100), `${n}: page size`);
+      assert.equal(data.truncated, truncated, `${n} organisations, truncated=${data.truncated}`);
+    }
+  });
+
   test('lists letters with status, tracking and a formatted price', async () => {
     const { data } = await srv.call('pingen_list_letters');
     const row = data.letters.find(l => l.id === 'ltr-1');
@@ -284,6 +305,24 @@ describe('reading', () => {
       assert.equal(data.letters.length, 1, `${signal}: the short page was served as asked`);
       assert.equal(data.truncated, true, `${signal}: handed back 1 of ${4} without a word`);
     }
+  });
+
+  test('a full page that volunteers nothing is the last evidence there is', async () => {
+    // The third branch, which the two above deliberately leave standing alone.
+    // An answer with no link and no total says nothing about a rest — so a page
+    // that came back exactly as full as it was allowed to be is all there is to
+    // go on, and it is enough: a list that happened to end on the boundary is
+    // rare, and a list silently cut off is not.
+    const p = await start();
+    p.state.letterQuiet = true;
+    const s = await startServer({ PINGEN_API_BASE: p.base });
+    const full = await s.call('pingen_list_letters', { limit: 2 });
+    const short = await s.call('pingen_list_letters', { limit: 100 });
+    await s.stop();
+    await p.close();
+    assert.equal(full.data.letters.length, 2, 'the page filled');
+    assert.equal(full.data.truncated, true, 'a page as full as it was allowed to be, and not a word');
+    assert.equal(short.data.truncated, undefined, 'cried wolf over a page that did not fill');
   });
 
   test('at the largest page it stops asking for a larger one', async () => {
@@ -430,6 +469,17 @@ describe('reading', () => {
       assert.match(raw, /Ungültige letter_id/, `${JSON.stringify(bad)}: ${raw}`);
     }
     assert.equal(mock.state.urls.length, before, 'refused, and so never asked');
+  });
+
+  test('the refusal quotes enough of a bad id to recognise it, and not all of it', async () => {
+    // The id is quoted back so the caller can see which one was rejected, and
+    // it is a value the caller supplies — so the quote is capped. Without the
+    // cap the whole of it comes back, and an id built from a file, a page or a
+    // paste turns one refusal into a wall of text in the conversation.
+    const { raw, isError } = await srv.call('pingen_get_letter', { letter_id: `!${'x'.repeat(5000)}` });
+    assert.ok(isError);
+    assert.match(raw, /Ungültige letter_id/);
+    assert.ok(raw.length < 400, `the whole id came back: ${raw.length} characters`);
   });
 
   test('an unknown letter surfaces the upstream 404', async () => {
