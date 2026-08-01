@@ -41,10 +41,13 @@ try {
     process.exit(2);
   }
   // No upstream yet, which is ordinary on a branch that has not been pushed.
+  // Named with both ends, like the path above: `git diff HEAD~1 -- file` reads
+  // the working tree as the far end, so an uncommitted edit would be mutated
+  // here and not there, from a line that says only "against HEAD~1".
   against = 'HEAD~1';
   console.warn(`${base} does not resolve — comparing against ${against} instead.`);
   try {
-    diff = git('diff', '-U0', against, '--', FILE);
+    diff = git('diff', '-U0', against, 'HEAD', '--', FILE);
   } catch {
     console.error(`Neither ${base} nor ${against} resolves. Pass a base explicitly.`);
     process.exit(2);
