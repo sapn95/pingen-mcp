@@ -433,6 +433,13 @@ function writePrivate(path, bytes) {
   }
 }
 
+// A PDF says what it is in its first five bytes. That is the only claim about
+// the content this server makes on its own, and it is worth having in one place:
+// it decides both what may be uploaded and what may be written to disk as a
+// letter, and — see the download — which of the two shapes an answer is.
+const isPdf = b => b.subarray(0, 5).toString('latin1') === '%PDF-';
+const signature = b => JSON.stringify(b.subarray(0, 5).toString('latin1'));
+
 async function uploadFile(filePath) {
   // readFileSync takes a number as a file descriptor too: file_path: 0 reads
   // the MCP input stream, and a character device never ends.
@@ -447,7 +454,7 @@ async function uploadFile(filePath) {
   // A signature check, not a validity check: it catches the wrong path — a key,
   // a dump, a text file — before its bytes leave the machine. Whether the PDF
   // is a mailable letter is still Pingen's call.
-  if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
+  if (!isPdf(bytes)) {
     throw new Error(`Keine PDF-Datei (Signatur %PDF- fehlt): ${basename(filePath)}`);
   }
   const up = await api('GET', '/file-upload');
@@ -821,31 +828,48 @@ const callTool = async req => {
     }
     if (name === 'pingen_download_letter') {
       const r = await api('GET', `/organisations/${await oid()}/deliveries/letters/${lid}/file`, { raw: true });
-      // Media types are case-insensitive. "Application/PDF" is as valid as the
-      // lowercase form, and it used to be parsed as JSON and rejected.
-      const ct = (r.headers.get('content-type') || '').toLowerCase();
-      let bytes;
-      if (ct.includes('pdf') || ct.includes('octet-stream')) {
-        bytes = Buffer.from(await r.arrayBuffer());
-      } else {
-        const j = JSON.parse(await r.text());
-        const url = j.data?.attributes?.url || j.url;
-        if (!url) throw new Error('Kein Datei-URL in der Antwort (Brief evtl. noch nicht verarbeitet).');
+      // This answer is either the letter's bytes or a pointer to them, and which
+      // of the two it is used to be read off the Content-Type. That header has
+      // now been wrong twice in the same direction. "Application/PDF" was handed
+      // to JSON.parse until the sniff was folded to lower case, because a media
+      // type is case-insensitive and this one was compared literally — and an
+      // answer carrying no Content-Type at all still is, which is the one case
+      // HTTP actually spells out: a missing type is to be read as
+      // application/octet-stream, a label the fold already accepted as the
+      // letter. Same bytes, same status, header left off, and a perfectly good
+      // letter came back as "Unexpected token '%'".
+      //
+      // The body settles it and the header never has to. A PDF says what it is
+      // in its first five bytes, and those five bytes have to be checked before
+      // anything is written in any case; whatever does not say so is treated as
+      // the pointer. A label that is missing, mis-cased, or spelled some way
+      // nobody here has thought of costs nothing now.
+      let bytes = Buffer.from(await r.arrayBuffer());
+      if (!isPdf(bytes)) {
+        // Not the letter, so it should be the pointer to it — and a body that is
+        // not JSON either, a portal's HTML sign-in page or a bucket's XML error,
+        // carries no URL, which is the same answer as a pointer that carries
+        // none. What did come back is named, because "not processed yet" is the
+        // likeliest reason for it and not the only one.
+        let j = null;
+        try { j = JSON.parse(bytes.toString('utf8')); } catch { /* not the pointer either */ }
+        const url = j?.data?.attributes?.url || j?.url;
+        if (!url) throw new Error(`Kein Datei-URL in der Antwort (${bytes.length} Bytes, Signatur ${signature(bytes)}) — Brief evtl. noch nicht verarbeitet.`);
         // Through http(), like everything else: this used to be a bare fetch,
         // so the one request that moves the most bytes was the only unbounded
         // one in the server, and a stalled bucket hung the client for ever.
         const f = await http('Datei-Download', url, { timeout: TRANSFER_TIMEOUT_MS });
         if (!f.ok) throw new Error(`Datei-Download ${f.status}`);
-        // The direct path above checks the content type; this one used to take
-        // whatever came back. A bucket that answers an expired link with an XML
-        // error, or a portal that answers with HTML, would have been written to
-        // disk as the letter and reported as saved.
         bytes = Buffer.from(await f.arrayBuffer());
       }
-      // Whichever path produced them, the bytes have to be a PDF. Saying
-      // "saved" about an error page is a wrong answer, not a failure.
-      if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') {
-        throw new Error(`Antwort ist kein PDF (${bytes.length} Bytes, Signatur ${JSON.stringify(bytes.subarray(0, 5).toString('latin1'))}) — Brief evtl. noch nicht verarbeitet.`);
+      // The pointer is followed on trust, and it leads somewhere this server
+      // does not control. A bucket that answers an expired link with an XML
+      // error, or a portal that answers with HTML, would otherwise be written to
+      // disk as the letter and reported as saved — a wrong answer, not a
+      // failure. Saying "saved" about an error page is the same class of thing
+      // as saying "posted" about a letter Pingen never took.
+      if (!isPdf(bytes)) {
+        throw new Error(`Antwort ist kein PDF (${bytes.length} Bytes, Signatur ${signature(bytes)}) — Brief evtl. noch nicht verarbeitet.`);
       }
       // A letter is correspondence. Written with the process umask it can land
       // group- and world-readable, and `w` follows a symlink at that path.

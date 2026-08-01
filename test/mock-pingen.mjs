@@ -70,7 +70,24 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // same commit — the sort order, the upload's content type, a token that gets
     // revoked, a create that answers with no status. This is the one that was
     // diagnosed and not fitted.
+    //
+    // null omits the header altogether, which is a third spelling again and the
+    // one HTTP defines: no Content-Type means application/octet-stream, a label
+    // the fold above already accepts. Even after the fold this fixture could
+    // only ever send a header that was there, so the case the spec spells out
+    // was the case nothing could reach — and it was the one the tool got wrong.
     fileContentType: 'application/pdf',
+    // What that route answers WITH, as opposed to what it labels the answer. It
+    // was the letter's own bytes and nothing else, so "this is not a PDF" could
+    // not be reached from here at all.
+    fileBytes: '%PDF-1.4 direct-bytes',
+    // And the bucket the pointer leads to, which answered 200 with a PDF and
+    // nothing else — so neither guard on that path could be reached either: a
+    // link the store refuses, and a link that leads to something that is not a
+    // letter. Both are the ordinary way a signed URL goes wrong once it has
+    // expired.
+    blobStatus: 200,
+    blobBody: '%PDF-1.7 fetched-from-blob',
     // A real authorisation server hands out a different bearer every time and
     // says how long it lasts. Answering with one constant token for ever meant
     // a server that had lost track of a token it used to hold looked exactly
@@ -160,8 +177,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     const p = url.pathname;
     state.calls.push(`${req.method} ${p}`);
     state.urls.push(`${req.method} ${req.url}`);
+    // A null type sends no Content-Type header at all, rather than an empty one:
+    // "absent" and "present but wrong" are two different answers, and only the
+    // second one this fixture could ever give.
     const send = (code, body, type = 'application/vnd.api+json') => {
-      res.writeHead(code, { 'Content-Type': type });
+      res.writeHead(code, type == null ? {} : { 'Content-Type': type });
       res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
     };
     const read = () => new Promise(resolve => {
@@ -220,7 +240,8 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       return send(200, '', 'text/plain');
     }
     if (p.startsWith('/blob/') && req.method === 'GET') {
-      return send(200, Buffer.from('%PDF-1.7 fetched-from-blob'), 'application/pdf');
+      return send(state.blobStatus, Buffer.from(state.blobBody),
+        state.blobStatus === 200 ? 'application/pdf' : 'application/xml');
     }
 
     // --- everything else needs the bearer token ------------------------------
@@ -357,7 +378,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (tail === 'file' && req.method === 'GET') {
       // Three shapes the API is known to answer with, all of which the tool
       // has to cope with: the bytes, a pointer to them, or neither.
-      if (id === 'ltr-1') return send(200, Buffer.from('%PDF-1.4 direct-bytes'), state.fileContentType);
+      if (id === 'ltr-1') return send(200, Buffer.from(state.fileBytes), state.fileContentType);
       if (id === 'ltr-2') return send(200, { data: { attributes: { url: `${base}/blob/${id}.pdf` } } }, 'application/json');
       return send(200, { data: { attributes: {} } }, 'application/json');
     }

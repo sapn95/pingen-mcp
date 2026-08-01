@@ -12,6 +12,20 @@ import { startServer } from './client.mjs';
 let mock, srv, out, pdf;
 let draftId;
 
+// Puts the file route back to answering with the letter after a test has had it
+// answer with something else. Kept as a function and called from a `finally`,
+// for the two reasons its sibling in safety.test.mjs is: a failed assertion must
+// not leave every later test in the file downloading an error page, and a
+// restore written out at the call site is an assignment made after an await —
+// exactly the shape that cannot be shown to be safe from the outside, which is
+// also what the linter says about it.
+const fileAnswersAgain = () => {
+  mock.state.fileContentType = 'application/pdf';
+  mock.state.fileBytes = '%PDF-1.4 direct-bytes';
+  mock.state.blobStatus = 200;
+  mock.state.blobBody = '%PDF-1.7 fetched-from-blob';
+};
+
 before(async () => {
   mock = await start();
   out = mkdtempSync(join(tmpdir(), 'pingen-test-'));
@@ -146,6 +160,27 @@ describe('authentication', () => {
     assert.equal(data.active, 'org-c', `declared a working configuration broken: ${JSON.stringify(data)}`);
     assert.equal(data.error, undefined, `and reported it as an error: ${data.error}`);
     assert.equal(data.truncated, true, 'while still saying the list was only a page');
+  });
+
+  test('a PINGEN_ORG_UUID that belongs to nothing is not reported as active', async () => {
+    // The half of that check the test above cannot reach. A configured UUID used
+    // to be echoed back as the active organisation without anyone asking whether
+    // the account can reach it, so a stale or mistyped value produced a
+    // confident, false answer — and every later call then 404s for reasons this
+    // very tool had just called fine. The commit that fixed it said in as many
+    // words that the fixture could only answer with the status the request
+    // implied, "so neither of those could have been caught here", and then fitted
+    // the fixture for the status half only. Nothing has held this half since:
+    // deleting the whole membership check left all 103 tests green, because the
+    // paginated case falls through to the same shape the later-page test asserts.
+    const one = await start();
+    const s = await startServer({ PINGEN_API_BASE: one.base, PINGEN_ORG_UUID: 'org-nobody-has' });
+    const { data } = await s.call('pingen_status');
+    await s.stop();
+    await one.close();
+    assert.equal(data.active, null, `a UUID no organisation has was announced as active: ${JSON.stringify(data)}`);
+    assert.match(String(data.error), /org-nobody-has/, `it did not name the value to go and fix: ${JSON.stringify(data)}`);
+    assert.equal(data.truncated, undefined, 'the list was complete, so there is nothing to hedge about');
   });
 
   test('an account without organisations says so instead of guessing', async () => {
@@ -493,10 +528,116 @@ describe('downloads', () => {
     assert.match(readFileSync(p, 'utf8'), /direct-bytes/);
   });
 
+  test('an answer with no media type at all is still the letter', async () => {
+    // The third spelling of the same header, and the one HTTP defines rather
+    // than merely permits: RFC 7231 says an answer with no Content-Type is to be
+    // read as application/octet-stream, which is a label the sniff above already
+    // accepts as the letter. Read as a JSON pointer instead, the letter's own
+    // bytes went to JSON.parse and came back as "Unexpected token '%'" — the
+    // identical failure the upper-case spelling used to produce, reached through
+    // the header being absent rather than mis-cased. The fixture could not send
+    // it: this mock always wrote a Content-Type, so after the fold there was
+    // still exactly one shape of that header it could not answer with, and that
+    // was the shape the tool got wrong. What settles it is the body, which says
+    // %PDF- whatever the envelope claims.
+    const p = join(out, 'unlabelled.pdf');
+    let r;
+    mock.state.fileContentType = null;
+    try {
+      r = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: p });
+    } finally {
+      fileAnswersAgain();
+    }
+    assert.ok(!r.isError, `an answer with no Content-Type was not read as the letter: ${r.raw}`);
+    assert.equal(r.data.saved, p);
+    assert.match(readFileSync(p, 'utf8'), /direct-bytes/);
+  });
+
+  test('a sign-in page labelled as the letter is not saved as one', async () => {
+    // The direct half of "whatever came back is not necessarily the letter". A
+    // portal in front of the API answers an unauthenticated GET with HTML and a
+    // 200, and it is perfectly capable of labelling it however it likes. The
+    // signature check is what stops that reaching disk under the name of a
+    // letter — and until now no route here could answer the file with anything
+    // but a PDF, so removing the check cost nothing in this suite.
+    const p = join(out, 'portal.pdf');
+    const before = mock.state.calls.filter(c => c.endsWith('/file')).length;
+    let r;
+    mock.state.fileBytes = '<html><body>Bitte anmelden</body></html>';
+    try {
+      r = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: p });
+    } finally {
+      fileAnswersAgain();
+    }
+    const { raw, isError } = r;
+    // The premise first: "nothing was written" is also true of a call that never
+    // went out, and a regression has to read as an error page on disk rather
+    // than as a fixture that answered nothing.
+    assert.equal(mock.state.calls.filter(c => c.endsWith('/file')).length, before + 1, 'the file was never asked for');
+    assert.ok(isError, 'an HTML page was accepted as the letter');
+    assert.ok(!existsSync(p), 'and written to disk as one');
+    // What came back, not a guess about it: an answer that is neither the letter
+    // nor a pointer to it has to say so with the thing it actually was, or the
+    // reader is left with a sentence about a letter that is not ready when the
+    // truth is that something answered in the API's place.
+    assert.match(raw, /<html/, `it did not say what came back instead: ${raw}`);
+  });
+
   test('follows the pointer when the API answers with a URL instead', async () => {
     const p = join(out, 'pointer.pdf');
     await srv.call('pingen_download_letter', { letter_id: 'ltr-2', output_path: p });
     assert.match(readFileSync(p, 'utf8'), /fetched-from-blob/);
+  });
+
+  test('an expired link answered with XML is not saved as the letter', async () => {
+    // The commit that added the signature check said exactly this: "a bucket
+    // answering an expired link with an XML error, or a portal answering with
+    // HTML, was saved as the letter and reported as saved". It fixed the code
+    // and left the fixture alone — the blob route answered 200 with a PDF and
+    // could answer nothing else — so the guard has had no test since the day it
+    // was written, and deleting it left all 103 tests green. A signed URL that
+    // has run out is the ordinary way this happens, and "saved" over an error
+    // page is a wrong answer rather than a failure: nobody opens the file again
+    // until they need it.
+    const p = join(out, 'expired.pdf');
+    const before = mock.state.calls.filter(c => c.startsWith('GET /blob/')).length;
+    let r;
+    mock.state.blobBody = '<?xml version="1.0"?><Error><Code>AccessDenied</Code></Error>';
+    try {
+      r = await srv.call('pingen_download_letter', { letter_id: 'ltr-2', output_path: p });
+    } finally {
+      fileAnswersAgain();
+    }
+    const { raw, isError } = r;
+    // The premise: the pointer was followed and this is what it led to. Without
+    // it, a download that fell over before ever reaching the link would satisfy
+    // every assertion below.
+    assert.equal(mock.state.calls.filter(c => c.startsWith('GET /blob/')).length, before + 1, 'the link was never followed');
+    assert.ok(isError, 'an XML error page was accepted as the letter');
+    assert.ok(!existsSync(p), 'and written to disk as one');
+    assert.match(raw, /kein PDF/, `it did not say what was wrong with it: ${raw}`);
+  });
+
+  test('a link the store refuses is reported rather than written', async () => {
+    // The companion request, and the other guard on that path with nothing
+    // behind it: the call to the API succeeded, the call to the place it pointed
+    // at did not. The mock answered 200 there whatever was asked, so a refused
+    // link was a shape the suite could not produce at all.
+    const p = join(out, 'refused.pdf');
+    const before = mock.state.calls.filter(c => c.startsWith('GET /blob/')).length;
+    let r;
+    mock.state.blobStatus = 403;
+    mock.state.blobBody = '<?xml version="1.0"?><Error><Code>AccessDenied</Code></Error>';
+    try {
+      r = await srv.call('pingen_download_letter', { letter_id: 'ltr-2', output_path: p });
+    } finally {
+      fileAnswersAgain();
+    }
+    const { raw, isError } = r;
+    assert.equal(mock.state.calls.filter(c => c.startsWith('GET /blob/')).length, before + 1, 'the link was never followed');
+    assert.ok(isError);
+    assert.match(raw, /Datei-Download 403/, `the status of the refusal went missing: ${raw}`);
+    assert.ok(!existsSync(p), 'something was written for it');
   });
 
   test('says the file is not ready rather than writing an empty one', async () => {
