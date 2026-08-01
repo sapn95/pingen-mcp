@@ -75,7 +75,14 @@ for (const [from, to] of ranges.slice(1)) {
   else merged.push([from, to]);
 }
 
-const args = ['stryker', 'run', ...merged.flatMap(([a, b]) => ['--mutate', `${FILE}:${a}-${b}`])];
+// One --mutate, comma separated. Repeating the flag does NOT accumulate:
+// Stryker parses it with `val => val.split(',')`, which ignores the value
+// already there, so commander's last occurrence simply wins. A script that
+// passed one flag per range would have mutated only the final hunk while
+// printing all of them — the quietest way there is to report a score for
+// lines nothing was run against.
+const spec = merged.map(([a, b]) => `${FILE}:${a}-${b}`).join(',');
+const args = ['stryker', 'run', '--mutate', spec];
 const lines = merged.reduce((n, [a, b]) => n + (b - a + 1), 0);
 console.log(`${merged.length} range(s), ${lines} line(s) against ${against}:`);
 for (const [a, b] of merged) console.log(`  ${FILE}:${a}-${b}`);
