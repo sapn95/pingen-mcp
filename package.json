@@ -1,7 +1,7 @@
 {
   "name": "pingen-mcp",
   "version": "0.2.3",
-  "description": "MCP server for Pingen v2 — send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
+  "description": "MCP server for Pingen v2 \u2014 send physical letters (A-Post/B-Post/registered) from a PDF and track them via the Pingen REST API",
   "type": "module",
   "bin": {
     "pingen-mcp": "index.js"
@@ -27,7 +27,9 @@
     "test": "node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs test/hygiene.test.mjs",
     "coverage": "c8 --reporter=text-summary --include=index.js --check-coverage --lines 90 --functions 90 --branches 80 node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs test/hygiene.test.mjs",
     "gate": "npm run lint && node scripts/smoke.mjs && node scripts/hygiene.mjs && npm run coverage",
-    "prepublishOnly": "npm run gate"
+    "prepublishOnly": "npm run gate",
+    "mutate": "node scripts/mutate-changed.mjs",
+    "mutate:all": "stryker run"
   },
   "files": [
     "index.js",
