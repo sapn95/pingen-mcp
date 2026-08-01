@@ -8,8 +8,8 @@
   ],
   "coverageAnalysis": "off",
   "incremental": false,
-  "timeoutMS": 60000,
-  "concurrency": 8,
+  "timeoutMS": 10000,
+  "concurrency": 12,
   "reporters": [
     "clear-text",
     "json"
@@ -23,5 +23,6 @@
     "command": "node --test --test-concurrency=1 test/api.test.mjs test/safety.test.mjs"
   },
   "_runner": "Not `npm test`: that also runs test/hygiene.test.mjs, which reads the tracked files looking for real personal data. A mutant in index.js cannot change what is written in a file, so those 10.7 seconds were spent 832 times to learn nothing. The two files left are the ones that drive index.js. If a mutant ever survives that only hygiene would have caught, this line is the reason, and hygiene still runs on every commit.",
-  "_incremental": "Off, and it has to be. Incremental reuse is decided per mutant from which tests covered and killed it \u2014 and the command runner reports the whole suite as ONE synthetic test, whose identity does not change when a test file does. So every mutant looks reusable after any test change, and a run that should have re-checked the new tests reports the old numbers instead. That happened here: an edited config gave an identical 832-NoCoverage summary in twelve seconds. Turning it on again needs coverageAnalysis, which needs a runner that loads the code in-process, which this suite cannot use because it drives the server over stdio as a child."
+  "_incremental": "Off, and it has to be. Incremental reuse is decided per mutant from which tests covered and killed it \u2014 and the command runner reports the whole suite as ONE synthetic test, whose identity does not change when a test file does. So every mutant looks reusable after any test change, and a run that should have re-checked the new tests reports the old numbers instead. That happened here: an edited config gave an identical 832-NoCoverage summary in twelve seconds. Turning it on again needs coverageAnalysis, which needs a runner that loads the code in-process, which this suite cannot use because it drives the server over stdio as a child.",
+  "_timeout": "A healthy run of the two files is about 8.5 seconds, and 172 of 832 mutants hang. At the old 60000 those alone were roughly 21 of the 38 minutes \u2014 more than every other mutant put together. Stryker's effective limit is timeoutMS plus netTime times 1.5, so 10000 still allows ~23s, near three times a normal run: slack enough that a merely slow mutant is not miscounted as a hang, which would inflate the score rather than deflate it. Concurrency is above the core count on purpose \u2014 each runner spends most of its life waiting on a child process and an HTTP fixture, and at 8 the machine sat at half load."
 }
