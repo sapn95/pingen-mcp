@@ -172,9 +172,15 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // and a page shorter than the list without being the end of it.
     orgSignal: null,
     orgPageCap: null,
+    // Neither link nor total, which is the only shape in which the third
+    // branch — a page that came back exactly full — is the last evidence
+    // there is. eventsQuiet has done this for the events collection since it
+    // was needed there; these two had no way to reach that branch at all.
+    orgQuiet: false,
     // And the letters collection, which has the same three branches again.
     letterSignal: null,
     letterPageCap: null,
+    letterQuiet: false,
     letters: [
       // Deliberately out of order in the array: the API is asked for
       // newest-first, and a mock that hands back insertion order cannot show
@@ -280,6 +286,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (p === '/organisations' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('page[limit]') || state.orgPageMax), state.orgPageMax);
       const page = state.orgs.slice(0, Math.min(limit, state.orgPageCap ?? limit));
+      if (state.orgQuiet) return send(200, { data: page });
       const nextUrl = `${base}/organisations?page[number]=2`;
       // Same reason as eventsSignal, on the collection that has the same three
       // branches: sending the link and the total together makes them agree, and
@@ -312,6 +319,7 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         // meta and a next link. Answering with a bare `data` array meant a tool
         // that handed one page over as the whole list looked exactly like one
         // that had read the list to the end.
+        if (state.letterQuiet) return send(200, { data: page });
         const nextUrl = `${base}/organisations/${ORG}/deliveries/letters?page[number]=2`;
         // Third collection, third pair of knobs, same reason: the link and the
         // total agreeing on every answer is what made the tool's three branches
