@@ -21,15 +21,34 @@ const listOnly = process.argv.includes('--list');
 const base = argv[0] || 'origin/main';
 const FILE = 'index.js';
 
-const git = (...args) => execFileSync('git', args, { encoding: 'utf8' });
+// stderr ignored: a bad ref makes git say so in its own words, and then this
+// script says so in words that name what to do about it. One is enough.
+const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 
-let diff;
+// A base that cannot be resolved is not a smaller question, it is a different
+// one. Falling back quietly meant the line below went on saying "against
+// origin/main" while the ranges came from somewhere else entirely — and the
+// ranges are the whole output: mutating the wrong ones proves the wrong lines
+// and reports a score for them. An explicit base is therefore an error if it
+// does not resolve, and only the default is allowed to fall back, out loud.
+const explicit = argv.length > 0;
+let diff, against = base;
 try {
   diff = git('diff', '-U0', `${base}...HEAD`, '--', FILE);
 } catch {
-  // No such base, or no upstream. Fall back to the previous commit, which is
-  // the useful default when the branch has not been pushed yet.
-  diff = git('diff', '-U0', 'HEAD~1', '--', FILE);
+  if (explicit) {
+    console.error(`Cannot compare ${FILE} against ${base}. Fetch that ref, or pass one that resolves.`);
+    process.exit(2);
+  }
+  // No upstream yet, which is ordinary on a branch that has not been pushed.
+  against = 'HEAD~1';
+  console.warn(`${base} does not resolve — comparing against ${against} instead.`);
+  try {
+    diff = git('diff', '-U0', against, '--', FILE);
+  } catch {
+    console.error(`Neither ${base} nor ${against} resolves. Pass a base explicitly.`);
+    process.exit(2);
+  }
 }
 
 // @@ -old,len +new,len @@ — only the new side matters, and a hunk with no
@@ -43,7 +62,7 @@ for (const [, start, len] of diff.matchAll(/^@@ -\S+ \+(\d+)(?:,(\d+))? @@/gm)) 
 }
 
 if (!ranges.length) {
-  console.log(`No changed lines in ${FILE} against ${base} — nothing to mutate.`);
+  console.log(`No changed lines in ${FILE} against ${against} — nothing to mutate.`);
   process.exit(0);
 }
 
@@ -58,7 +77,7 @@ for (const [from, to] of ranges.slice(1)) {
 
 const args = ['stryker', 'run', ...merged.flatMap(([a, b]) => ['--mutate', `${FILE}:${a}-${b}`])];
 const lines = merged.reduce((n, [a, b]) => n + (b - a + 1), 0);
-console.log(`${merged.length} range(s), ${lines} line(s) against ${base}:`);
+console.log(`${merged.length} range(s), ${lines} line(s) against ${against}:`);
 for (const [a, b] of merged) console.log(`  ${FILE}:${a}-${b}`);
 
 if (listOnly) process.exit(0);
