@@ -169,6 +169,32 @@ accident:
    deleted draft does not come back. `pingen_cancel_letter` does not: stopping
    a letter is the safe direction.
 
+```mermaid
+flowchart TD
+    PDF["your PDF"] --> SEND["pingen_send_letter"]
+    SEND -->|"default"| DRAFT["draft — nothing is mailed,<br/>review it in the dashboard"]
+    SEND -->|"auto_send: true<br/>(needs delivery_product)"| POST
+
+    DRAFT --> ST{"status"}
+    ST -->|"valid"| SUB["pingen_submit_letter<br/>confirm: true"]
+    ST -->|"validating"| WAIT["still being checked —<br/>ask again in a moment"]
+    ST -->|"action_required<br/>invalid"| STOP["Pingen will not take it.<br/>Sending it again does not help;<br/>a corrected PDF does"]
+
+    SUB --> POST[("mailed — paper in the post,<br/>and it costs money")]
+    WAIT -.-> ST
+
+    STOP -.->|"the letter carries the status,<br/>the trail carries the reason"| EV["pingen_letter_events"]
+    DRAFT -.->|"confirm: true —<br/>a deleted draft does not come back"| DEL["pingen_delete_letter"]
+    POST -.->|"no confirm needed —<br/>stopping is the safe direction"| CAN["pingen_cancel_letter"]
+
+    classDef gate fill:#fff4e5,stroke:#d9822b
+    classDef bad fill:#fdecea,stroke:#c0392b
+    classDef done fill:#eafaf1,stroke:#27ae60
+    class SUB,DEL gate
+    class STOP bad
+    class POST done
+```
+
 The only shortcut is passing `auto_send: true` to `pingen_send_letter`, which
 mails immediately without a review step — use deliberately. It also requires
 `delivery_product`: the product is optional on a draft only because
