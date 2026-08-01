@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing answers the one question the review rounds kept asking by hand: if this guard were removed, would anything notice? Three findings in a row came from deleting a check and watching the suite stay green. Stryker does that automatically and costs no model tokens.",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "mutate": [
+    "index.js"
+  ],
+  "coverageAnalysis": "off",
+  "incremental": false,
+  "timeoutMS": 60000,
+  "concurrency": 4,
+  "reporters": [
+    "clear-text",
+    "json"
+  ],
+  "thresholds": {
+    "high": 90,
+    "low": 70,
+    "break": null
+  },
+  "commandRunner": {
+    "command": "npm test"
+  }
+}

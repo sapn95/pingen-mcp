@@ -13,3 +13,8 @@ secrets.json
 # Coverage output is generated, never committed.
 coverage/
 .nyc_output/
+
+# Mutation testing: the sandbox is a copy of the working tree, and the report is
+# a rendering of a run. The config is committed; neither of these is.
+.stryker-tmp/
+reports/

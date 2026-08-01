@@ -116,6 +116,19 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // exactly full being the last evidence available. This is how that case is
     // put to the events tool as well.
     eventsQuiet: false,
+    // Which of the two signals the answer carries, when it does not carry both.
+    // Left null it sends the pair, and the pair is why the tool's three
+    // branches could not be told apart: with a long trail and a full page,
+    // link, total and full-page all say "there is more", so removing any one
+    // of them changes nothing an assertion can see. 'next' sends the link
+    // alone, 'total' the count alone, and either one on a short page — which
+    // is the only arrangement in which a single branch is load-bearing.
+    eventsSignal: null,
+    // Hand back fewer than were asked for. A server is allowed to: page[limit]
+    // is a ceiling, not an order, and a cursor-paginated one routinely answers
+    // short while still pointing at a next page. It is also the only way to
+    // produce a page that is not full and not the end of the list.
+    eventsPageCap: null,
     // Do the work and then answer nothing at all: 'send' or 'create' kills the
     // connection once the letter has been taken for printing, with no status,
     // no body and nothing to branch on. Every other hostile case here is an
@@ -367,8 +380,11 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       const limit = Number(url.searchParams.get('page[limit]') || 20);
       const newestFirst = [...state.eventTrail].sort((a, b) =>
         String(b.attributes?.emitted_at || '').localeCompare(String(a.attributes?.emitted_at || '')));
-      const page = newestFirst.slice(0, limit);
+      const page = newestFirst.slice(0, Math.min(limit, state.eventsPageCap ?? limit));
       if (state.eventsQuiet) return send(200, { data: page });
+      const nextUrl = `${base}/organisations/${ORG}/deliveries/letters/${id}/events?page[number]=2`;
+      if (state.eventsSignal === 'next') return send(200, { data: page, links: { next: page.length < newestFirst.length ? nextUrl : null } });
+      if (state.eventsSignal === 'total') return send(200, { data: page, meta: { total: newestFirst.length, per_page: limit, current_page: 1 } });
       return send(200, {
         data: page,
         links: { next: page.length < newestFirst.length ? `${base}/organisations/${ORG}/deliveries/letters/${id}/events?page[number]=2` : null },
