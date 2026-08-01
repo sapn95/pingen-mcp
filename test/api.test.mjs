@@ -265,6 +265,27 @@ describe('reading', () => {
     assert.equal(data.truncated, undefined, 'cried wolf over a complete list');
   });
 
+  test('one signal at a time is still enough to know the list was cut', async () => {
+    // The third collection with the same three branches, and the same reason
+    // none of them could be told from the others: every answer above carries
+    // the next link and the total at once, on a page that is also full. Delete
+    // any one branch and the other two still answer. A short page carrying one
+    // signal is the only arrangement where a single branch is load-bearing —
+    // and a server answering short while pointing at more is ordinary, not
+    // exotic: page[limit] is a ceiling, not an order.
+    for (const signal of ['next', 'total']) {
+      const p = await start();
+      p.state.letterSignal = signal;
+      p.state.letterPageCap = 1;
+      const s = await startServer({ PINGEN_API_BASE: p.base });
+      const { data } = await s.call('pingen_list_letters', { limit: 100 });
+      await s.stop();
+      await p.close();
+      assert.equal(data.letters.length, 1, `${signal}: the short page was served as asked`);
+      assert.equal(data.truncated, true, `${signal}: handed back 1 of ${4} without a word`);
+    }
+  });
+
   test('at the largest page it stops asking for a larger one', async () => {
     // The truncation note told a caller who had already asked for 100 to raise
     // the limit, which is advice nobody can follow: 100 is the cap and there is
@@ -525,6 +546,25 @@ describe('failure paths', () => {
     assert.match(raw, /Upload-Slot ohne URL/);
   });
 
+  test('half an upload slot is no more usable than none of one', async () => {
+    // The test above sends back neither half, so the check reads the same
+    // whether it is an `||` or an `&&` — swapping it changed nothing anybody
+    // could see. The halves are not interchangeable: a URL cannot be presented
+    // without the signature it was issued against, and a signature is not
+    // somewhere to PUT to.
+    for (const half of ['url', 'signature']) {
+      mock.state.slotHalf = half;
+      let out;
+      try {
+        out = await srv.call('pingen_send_letter', { file_path: pdf });
+      } finally {
+        mock.state.slotHalf = null;
+      }
+      assert.ok(out.isError, `a slot with only the ${half} was used`);
+      assert.match(out.raw, /Upload-Slot ohne URL/, `${half}: ${out.raw}`);
+    }
+  });
+
   test('a failed byte upload is reported with its status', async () => {
     mock.state.uploadStatus = 503;
     const { raw, isError } = await srv.call('pingen_send_letter', { file_path: pdf });
@@ -550,6 +590,32 @@ describe('downloads', () => {
       assert.match(raw, /muss ein Pfad sein|output_path/);
     }
     assert.ok(!srv.stderr().includes('%PDF'), 'a letter reached stderr');
+  });
+
+  test('a relative output_path is refused rather than resolved against a directory nobody chose', async () => {
+    // The guard next to the fd one, and the mutation run found nothing had ever
+    // handed it a relative path: the server's working directory is whatever the
+    // MCP client happened to start it in, so "letter.pdf" writes the letter
+    // somewhere the caller cannot predict and will not think to look.
+    for (const bad of ['letter.pdf', './letter.pdf', '../letter.pdf']) {
+      const { raw, isError } = await srv.call('pingen_download_letter', { letter_id: 'ltr-1', output_path: bad });
+      assert.ok(isError, `${bad} was accepted`);
+      assert.match(raw, /absolut/, `${bad}: ${raw}`);
+    }
+  });
+
+  test('a file_path that is relative, or not a file, is refused before anything is uploaded', async () => {
+    // The same guard on the way in, where it decides which PDF gets mailed. A
+    // directory reads fine with statSync and then readFileSync throws EISDIR
+    // deep inside the send, long after the point where the answer could still
+    // say what was actually wrong.
+    const before = mock.state.uploads.length;
+    for (const [bad, why] of [['letter.pdf', /absolut/], ['./x.pdf', /absolut/], [out, /normale Datei/]]) {
+      const { raw, isError } = await srv.call('pingen_send_letter', { file_path: bad });
+      assert.ok(isError, `${bad} was accepted`);
+      assert.match(raw, why, `${bad}: ${raw}`);
+    }
+    assert.equal(mock.state.uploads.length, before, 'something went up anyway');
   });
 
   test('a destination symlink is refused rather than followed', async () => {

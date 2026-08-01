@@ -56,7 +56,8 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     cancelled: [],
     deleted: [],
     uploadStatus: 200,    // flip to fail the PUT of the bytes
-    slotBroken: false,    // flip to hand out a slot without a URL
+    slotBroken: false,
+    slotHalf: null,    // flip to hand out a slot without a URL
     // What the file route labels the letter's bytes with. A media type is
     // case-insensitive, and a store handing out a signed object is as likely to
     // call it a plain byte stream as a PDF, so the tool sniffs for both — and
@@ -171,6 +172,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // and a page shorter than the list without being the end of it.
     orgSignal: null,
     orgPageCap: null,
+    // And the letters collection, which has the same three branches again.
+    letterSignal: null,
+    letterPageCap: null,
     letters: [
       // Deliberately out of order in the array: the API is asked for
       // newest-first, and a mock that hands back insertion order cannot show
@@ -245,6 +249,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       if (!bearerOk(req)) return send(401, { error: 'unauthorized' });
       state.authHeaders.push(req.headers.authorization || '');
       if (state.slotBroken) return send(200, { data: { type: 'file_uploads', attributes: {} } });
+      // Half a slot: the URL without the signature it has to be presented
+      // with, or the other way round. An answer missing both is the one that
+      // was ever tested, and either half alone is refused by the same check —
+      // which is why swapping its || for an && went unnoticed.
+      if (state.slotHalf === 'url') return send(200, { data: { type: 'file_uploads', attributes: { url: `${base}/upload-slot/slot-1` } } });
+      if (state.slotHalf === 'signature') return send(200, { data: { type: 'file_uploads', attributes: { url_signature: 'sig-1' } } });
       return send(200, { data: { type: 'file_uploads', attributes: { url: `${base}/upload-slot/slot-1`, url_signature: 'sig-1' } } });
     }
     if (p.startsWith('/upload-slot/') && req.method === 'PUT') {
@@ -297,14 +307,20 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
         if (sort !== '-created_at') return send(400, { error: 'unsupported_sort', got: sort });
         const newestFirst = [...state.letters].sort((a, b) =>
           String(b.attributes?.created_at || '').localeCompare(String(a.attributes?.created_at || '')));
-        const page = newestFirst.slice(0, limit);
+        const page = newestFirst.slice(0, Math.min(limit, state.letterPageCap ?? limit));
         // The real collection endpoint paginates and says so, with the total in
         // meta and a next link. Answering with a bare `data` array meant a tool
         // that handed one page over as the whole list looked exactly like one
         // that had read the list to the end.
+        const nextUrl = `${base}/organisations/${ORG}/deliveries/letters?page[number]=2`;
+        // Third collection, third pair of knobs, same reason: the link and the
+        // total agreeing on every answer is what made the tool's three branches
+        // indistinguishable. See eventsSignal.
+        if (state.letterSignal === 'next') return send(200, { data: page, links: { next: page.length < newestFirst.length ? nextUrl : null } });
+        if (state.letterSignal === 'total') return send(200, { data: page, meta: { total: newestFirst.length, per_page: limit, current_page: 1 } });
         return send(200, {
           data: page,
-          links: { next: page.length < newestFirst.length ? `${base}/organisations/${ORG}/deliveries/letters?page[number]=2` : null },
+          links: { next: page.length < newestFirst.length ? nextUrl : null },
           meta: { total: newestFirst.length, per_page: limit, current_page: 1 },
         });
       }
