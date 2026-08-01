@@ -881,6 +881,39 @@ describe('credentials never leave the process', () => {
     assert.match(raw, /\*\*\*/, 'it is masked, not merely absent');
   });
 
+  test('a bearer nothing is travelling with is eventually let go, and one that is is not', async () => {
+    // The other half of the bound, and the half nothing had ever looked at:
+    // emptying forgetSpent entirely, or releaseToken with it, left every test
+    // green. Of course it did — everything above asks whether a bearer is
+    // still masked, and a set that never forgets masks everything. What the
+    // forgetting is for is that the set does not grow once per 401 for the
+    // life of the process, and every string that leaves here is walked over
+    // for each entry in it.
+    //
+    // It is deliberately a trade: a bearer that is dead, superseded and out of
+    // flight stops being masked, because quoting a token nothing will accept
+    // costs nothing. Written down here so that the day someone makes the set
+    // unbounded to close a "leak", this says what was given up for what.
+    const m = await start();
+    m.state.rotateTokens = true;
+    m.state.tokenTtl = 1;                  // near expiry on arrival: every call re-grants
+    const s = await startServer({ PINGEN_API_BASE: m.base });
+    for (let i = 0; i < 12; i++) await s.call('pingen_get_letter', { letter_id: 'ltr-1' });
+    const issued = [...m.state.issuedTokens];
+
+    m.state.echoToken = `Bearer ${issued[0]}`;          // long since released, and past the bound
+    const old = await s.call('pingen_get_letter', { letter_id: 'ltr-leak' });
+    m.state.echoToken = `Bearer ${issued.at(-1)}`;      // the one still in the variable
+    const live = await s.call('pingen_get_letter', { letter_id: 'ltr-leak' });
+    await s.stop();
+    await m.close();
+
+    assert.ok(issued.length > 8, `the fixture never got past the bound (${issued.length} grant(s))`);
+    assert.ok(!live.raw.includes(issued.at(-1)), `the live bearer reached a tool result: ${live.raw}`);
+    assert.ok(old.raw.includes(issued[0]),
+      'the first of twelve bearers is still held: the set is not being trimmed, and grows once per grant for the life of the process');
+  });
+
   test('a bearer is still known to the redactor when its own result is built', async () => {
     // The pin lasted exactly as long as the HTTP request, under a note that
     // said it lasted "until its answer has been turned into a result or a

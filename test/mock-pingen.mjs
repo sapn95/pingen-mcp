@@ -57,7 +57,9 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     deleted: [],
     uploadStatus: 200,    // flip to fail the PUT of the bytes
     slotBroken: false,
-    slotHalf: null,    // flip to hand out a slot without a URL
+    slotHalf: null,    // 'url' or 'signature': hand out half a slot
+    echoToken: null,   // which bearer the leaking letter quotes back
+    lenientMediaTypes: false,   // accept anything, the way this mock used to
     // What the file route labels the letter's bytes with. A media type is
     // case-insensitive, and a store handing out a signed object is as likely to
     // call it a plain byte stream as a PDF, so the tool sniffs for both — and
@@ -283,6 +285,23 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     if (!bearerOk(req)) return send(401, { error: 'unauthorized' });
     state.authHeaders.push(req.headers.authorization || '');
 
+    // And the media type, which this mock used to take on faith. A JSON:API
+    // server answers 406 to a request that will not accept its media type and
+    // 415 to a body sent as anything else, so getting either wrong here is a
+    // client that works against the fixture and fails against Pingen. Which is
+    // exactly what the mutants said: both header strings could be changed to
+    // anything at all and every test stayed green. Same lesson the sort order
+    // taught this file — a fixture that accepts more than the real one is a
+    // fixture that hides the difference.
+    if (!state.lenientMediaTypes) {
+      const accept = req.headers.accept || '';
+      if (!accept.includes('application/vnd.api+json')) return send(406, { error: 'not_acceptable', accept });
+      if (req.method === 'POST' || req.method === 'PATCH') {
+        const ct = req.headers['content-type'] || '';
+        if (!ct.includes('application/vnd.api+json')) return send(415, { error: 'unsupported_media_type', got: ct });
+      }
+    }
+
     if (p === '/organisations' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('page[limit]') || state.orgPageMax), state.orgPageMax);
       const page = state.orgs.slice(0, Math.min(limit, state.orgPageCap ?? limit));
@@ -334,6 +353,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
       }
       if (req.method === 'POST') {
         const body = JSON.parse((await read()).toString() || '{}');
+      // JSON:API says the member type has to match the collection posted to,
+      // and answers 409 when it does not. This mock read attributes straight
+      // out of the envelope and never looked at the type, so the string could
+      // be anything at all — a client sending the wrong one works here and is
+      // refused by Pingen.
+        if (body.data?.type !== 'letters') return send(409, { error: 'type_conflict', got: body.data?.type ?? null, want: 'letters' });
         const attributes = body.data?.attributes || {};
         state.created.push(attributes);
         const created = letter(`ltr-new-${state.created.length}`, {
@@ -376,13 +401,20 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // server has already replaced by the time it reads the answer.
     if (id === 'ltr-leak' && tail !== 'file') {
       if (state.holdLeak) await state.holdLeak;
-      return send(500, `{"error":"internal","request":{"authorization":"${req.headers.authorization}"}}`);
+      // Normally it quotes back whatever it was sent, which is always the live
+      // bearer. That makes what the redactor FORGETS invisible from outside:
+      // only a bearer it no longer holds can show whether forgetting happens
+      // at all, and no request can be made to arrive carrying a dead one.
+      // So the test names which bearer comes back.
+      const quoted = state.echoToken ?? req.headers.authorization;
+      return send(500, `{"error":"internal","request":{"authorization":"${quoted}"}}`);
     }
 
     if (tail === 'send') {
       // The real API only accepts PATCH here; a POST must not silently work.
       if (req.method !== 'PATCH') return send(405, { error: 'method_not_allowed', allowed: ['PATCH'] });
       const body = JSON.parse((await read()).toString() || '{}');
+      if (body.data?.type !== 'letters') return send(409, { error: 'type_conflict', got: body.data?.type ?? null, want: 'letters' });
       state.submitted.push({ id, attributes: body.data?.attributes || {} });
       known.attributes = { ...known.attributes, ...body.data?.attributes, status: state.sendStatus || 'processing', submitted_at: '2026-07-27T10:00:00+00:00' };
       if (state.omitSendStatus) delete known.attributes.status;
