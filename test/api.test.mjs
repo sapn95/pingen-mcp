@@ -12,6 +12,15 @@ import { startServer } from './client.mjs';
 let mock, srv, out, pdf;
 let draftId;
 
+// A tracking trail longer than the page the tool asks for. Minutes rather than
+// days apart, so the newest-first sort has something to sort on and the ids
+// stay in step with it when read back.
+const trail = n => Array.from({ length: n }, (_, i) => ({
+  id: `ev-${String(i).padStart(3, '0')}`,
+  type: 'letter_events',
+  attributes: { type: 'letter.status', emitted_at: `2026-01-01T00:${String(i % 60).padStart(2, '0')}:00+00:00` },
+}));
+
 // Puts the file route back to answering with the letter after a test has had it
 // answer with something else. Kept as a function and called from a `finally`,
 // for the two reasons its sibling in safety.test.mjs is: a failed assertion must
@@ -301,11 +310,7 @@ describe('reading', () => {
     // one whose story had simply ended, which is the answer "no, it never went
     // anywhere" is read off.
     const many = await start();
-    many.state.eventTrail = Array.from({ length: 150 }, (_, i) => ({
-      id: `ev-${String(i).padStart(3, '0')}`,
-      type: 'letter_events',
-      attributes: { type: 'letter.status', emitted_at: `2026-01-01T00:${String(i % 60).padStart(2, '0')}:00+00:00` },
-    }));
+    many.state.eventTrail = trail(150);
     many.state.eventsQuiet = true;
     const s = await startServer({ PINGEN_API_BASE: many.base });
     const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
@@ -327,6 +332,60 @@ describe('reading', () => {
     const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
     await s.stop();
     await few.close();
+    assert.equal(data.events.length, 2);
+    assert.equal(data.truncated, undefined, 'cried wolf over a complete history');
+  });
+
+  // The two tests above put the same evidence to the tool twice: a trail of 150
+  // answered with a full page, a next link and a total, all three saying the
+  // same thing. Mutation testing pointed out what that costs — delete the link
+  // branch, or the total branch, and the suite stays green, because whichever
+  // one is left still answers. The branch that actually runs against Pingen is
+  // the link, and it was the least defended of the three. Each of the next two
+  // gives the tool one signal on a short page, where nothing else can stand in.
+  test('a next link is believed even when the page came back short', async () => {
+    // Cursor pagination hands over what it has and points at the rest, so a
+    // page of three out of a hundred and fifty is an ordinary answer rather
+    // than a broken one. Read by page-fullness alone it is the end of the
+    // history, and a letter still in transit reads as one that stopped moving.
+    const p = await start();
+    p.state.eventTrail = trail(150);
+    p.state.eventsSignal = 'next';
+    p.state.eventsPageCap = 3;
+    const s = await startServer({ PINGEN_API_BASE: p.base });
+    const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
+    await s.stop();
+    await p.close();
+    assert.equal(data.events.length, 3, 'the short page was served as asked');
+    assert.equal(data.truncated, true, 'a short page with a next link is still not the whole history');
+    assert.match(data.hint, /ältesten/, 'newest-first means it is the old end that is missing');
+  });
+
+  test('a total is believed even when nothing links to the next page', async () => {
+    // And the other single signal: an answer that counts but does not link.
+    // Nothing here is full and nothing points anywhere, so the count is the
+    // only thing left that knows the history did not end at three.
+    const p = await start();
+    p.state.eventTrail = trail(150);
+    p.state.eventsSignal = 'total';
+    p.state.eventsPageCap = 3;
+    const s = await startServer({ PINGEN_API_BASE: p.base });
+    const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
+    await s.stop();
+    await p.close();
+    assert.equal(data.events.length, 3);
+    assert.equal(data.truncated, true, 'the total said 150 and three were handed over');
+  });
+
+  test('a total that matches what was handed over is not a warning', async () => {
+    // The counterpart, without which "believe the total" degenerates into
+    // "always warn": the count agrees with the page, so there is nothing to say.
+    const p = await start();
+    p.state.eventsSignal = 'total';
+    const s = await startServer({ PINGEN_API_BASE: p.base });
+    const { data } = await s.call('pingen_letter_events', { letter_id: 'ltr-1' });
+    await s.stop();
+    await p.close();
     assert.equal(data.events.length, 2);
     assert.equal(data.truncated, undefined, 'cried wolf over a complete history');
   });
