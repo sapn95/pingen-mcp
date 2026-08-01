@@ -165,6 +165,12 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
     // caller asks for, because that is the part a caller cannot fix by asking
     // for more: a page size is a request, and the API decides.
     orgPageMax: 20,
+    // The organisations collection reads truncation the same three ways the
+    // letters and the events do, so it needs the same two knobs to tell those
+    // three apart: which signal the answer carries when it carries only one,
+    // and a page shorter than the list without being the end of it.
+    orgSignal: null,
+    orgPageCap: null,
     letters: [
       // Deliberately out of order in the array: the API is asked for
       // newest-first, and a mock that hands back insertion order cannot show
@@ -263,10 +269,16 @@ export function start({ tokenStatus = 200, tokenBody = null } = {}) {
 
     if (p === '/organisations' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('page[limit]') || state.orgPageMax), state.orgPageMax);
-      const page = state.orgs.slice(0, limit);
+      const page = state.orgs.slice(0, Math.min(limit, state.orgPageCap ?? limit));
+      const nextUrl = `${base}/organisations?page[number]=2`;
+      // Same reason as eventsSignal, on the collection that has the same three
+      // branches: sending the link and the total together makes them agree, and
+      // two things that always agree cannot be told apart.
+      if (state.orgSignal === 'next') return send(200, { data: page, links: { next: page.length < state.orgs.length ? nextUrl : null } });
+      if (state.orgSignal === 'total') return send(200, { data: page, meta: { total: state.orgs.length, per_page: limit, current_page: 1 } });
       return send(200, {
         data: page,
-        links: { next: page.length < state.orgs.length ? `${base}/organisations?page[number]=2` : null },
+        links: { next: page.length < state.orgs.length ? nextUrl : null },
         meta: { total: state.orgs.length, per_page: limit, current_page: 1 },
       });
     }

@@ -146,6 +146,35 @@ describe('nothing is mailed by accident', () => {
     assert.ok(!calls.includes('GET /file-upload'), `it asked for an upload slot first: ${calls}`);
   });
 
+  test('one organisation on a page that is not the whole list is still not one organisation', async () => {
+    // The test above hands over both accounts and gets the refusal it should.
+    // This is the shape that does not: the page holds exactly one, and there is
+    // a second the answer only points at. Read by what is on the page, that is
+    // an account nobody chose being picked automatically, and the letter is
+    // franked at it. The tool already reads the pointer — but the fixture used
+    // to send the link and the total together on a full page, so all three ways
+    // of noticing agreed, and any one of them could be deleted without a sound.
+    // Mutation testing is what said so. One signal at a time, on a short page:
+    for (const signal of ['next', 'total']) {
+      const many = await start();
+      many.state.orgs = [
+        { id: 'org-a', type: 'organisations', attributes: { name: 'Example One' } },
+        { id: 'org-b', type: 'organisations', attributes: { name: 'Example Two' } },
+      ];
+      many.state.orgSignal = signal;
+      many.state.orgPageCap = 1;
+      const s = await startServer({ PINGEN_API_BASE: many.base, PINGEN_ORG_UUID: '' });
+      const { raw, isError } = await s.call('pingen_send_letter', { file_path: pdf });
+      const uploads = many.state.uploads.length;
+      await s.stop();
+      await many.close();
+      assert.ok(isError, `${signal}: it picked the one it could see`);
+      assert.match(raw, /PINGEN_ORG_UUID/, `${signal}: ${raw}`);
+      assert.match(raw, /erste Seite/, `${signal}: never said the page was not the list: ${raw}`);
+      assert.equal(uploads, 0, `${signal}: the letter went up anyway`);
+    }
+  });
+
   test('deleting without confirm removes nothing', async () => {
     const { data } = await srv.call('pingen_delete_letter', { letter_id: 'ltr-3' });
     assert.match(data.refused, /confirm:true/);
@@ -674,6 +703,29 @@ describe('nothing is mailed by accident', () => {
     assert.ok(isError);
     assert.match(raw, /pingen_list_letters/, `never named a way to check without an id: ${raw}`);
     assert.match(raw, /zweimal raus/, `a gateway's patience was read as Pingen's answer: ${raw}`);
+  });
+
+  test('the line between an answer and a silence is drawn at exactly 500', async () => {
+    // Everything above uses 502 or 504, which sit comfortably on one side of a
+    // boundary nothing had ever stood on. Mutation testing pointed that out:
+    // widening the test to `<= 500` left the whole suite green, and what that
+    // mutant does is mark a 500 as answered — which removes the warning from
+    // the one status most likely to mean the handler died holding the letter.
+    // 500 is the first status where nothing is known, so it gets the warning;
+    // 499 is still someone refusing, so it does not.
+    for (const [status, warned] of [[500, true], [499, false]]) {
+      mock.state.gatewayAfter = 'create';
+      mock.state.gatewayStatus = status;
+      let out;
+      try {
+        out = await srv.call('pingen_send_letter', { file_path: pdf, delivery_product: 'fast', auto_send: true });
+      } finally {
+        answersAgain();
+      }
+      assert.ok(out.isError, `${status} should still be an error`);
+      if (warned) assert.match(out.raw, /trotzdem raus/, `${status} tells nobody the letter may exist: ${out.raw}`);
+      else assert.doesNotMatch(out.raw, /trotzdem raus/, `${status} was answered, and got the warning anyway: ${out.raw}`);
+    }
   });
 
   test('a submit that never sent a request is not reported as a maybe-posted letter', async () => {
