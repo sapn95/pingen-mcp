@@ -14,11 +14,16 @@ let draftId;
 
 // A tracking trail longer than the page the tool asks for. Minutes rather than
 // days apart, so the newest-first sort has something to sort on and the ids
-// stay in step with it when read back.
+// stay in step with it when read back — which is why the hour carries: at 150
+// entries a bare `i % 60` handed the same timestamp to three different events,
+// and a sort over duplicates is not a sort, it is whatever order it started in.
 const trail = n => Array.from({ length: n }, (_, i) => ({
   id: `ev-${String(i).padStart(3, '0')}`,
   type: 'letter_events',
-  attributes: { type: 'letter.status', emitted_at: `2026-01-01T00:${String(i % 60).padStart(2, '0')}:00+00:00` },
+  attributes: {
+    type: 'letter.status',
+    emitted_at: `2026-01-01T${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}:00+00:00`,
+  },
 }));
 
 // Puts the file route back to answering with the letter after a test has had it
@@ -388,6 +393,22 @@ describe('reading', () => {
     await p.close();
     assert.equal(data.events.length, 2);
     assert.equal(data.truncated, undefined, 'cried wolf over a complete history');
+  });
+
+  test('a letter_id that is not one is refused instead of being pasted into a URL', async () => {
+    // The guard has been there since the id started being interpolated into a
+    // path, and nothing had ever handed it something to refuse — remove it
+    // entirely and the suite stayed green, which is how mutation testing found
+    // it. What it is for is the second case below: an id shaped like a path
+    // walks out of the letters collection and asks the API for something else
+    // entirely, and an id is a value the caller supplies.
+    const before = mock.state.urls.length;
+    for (const bad of ['../organisations', 'ltr 1', '.hidden', 'ltr/1', '']) {
+      const { raw, isError } = await srv.call('pingen_get_letter', { letter_id: bad });
+      assert.ok(isError, `${JSON.stringify(bad)} was accepted`);
+      assert.match(raw, /Ungültige letter_id/, `${JSON.stringify(bad)}: ${raw}`);
+    }
+    assert.equal(mock.state.urls.length, before, 'refused, and so never asked');
   });
 
   test('an unknown letter surfaces the upstream 404', async () => {
