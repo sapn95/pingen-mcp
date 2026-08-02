@@ -16,9 +16,24 @@
 // accident is the one outcome this script exists to avoid.
 import { execFileSync, spawnSync } from 'node:child_process';
 
-const argv = process.argv.slice(2).filter(a => a !== '--list');
-const listOnly = process.argv.includes('--list');
-const base = argv[0] || 'origin/main';
+// Checked rather than assumed. Anything unrecognised used to become the base
+// ref, so `--lsit` came back as "cannot compare against --lsit" — an answer
+// about a git revision to a question about a spelling — and a second argument
+// was dropped without a word.
+const USAGE = 'usage: mutate-changed [<base>] [--list]';
+const argv = process.argv.slice(2);
+const listOnly = argv.includes('--list');
+const rest = argv.filter(a => a !== '--list');
+const bad = rest.find(a => a.startsWith('-'));
+if (bad) {
+  console.error(`Unknown option ${bad}.\n${USAGE}`);
+  process.exit(2);
+}
+if (rest.length > 1) {
+  console.error(`One base at a time, got ${rest.length}: ${rest.join(' ')}\n${USAGE}`);
+  process.exit(2);
+}
+const base = rest[0] || 'origin/main';
 const FILE = 'index.js';
 
 // stderr ignored: a bad ref makes git say so in its own words, and then this
@@ -31,7 +46,7 @@ const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['
 // ranges are the whole output: mutating the wrong ones proves the wrong lines
 // and reports a score for them. An explicit base is therefore an error if it
 // does not resolve, and only the default is allowed to fall back, out loud.
-const explicit = argv.length > 0;
+const explicit = rest.length > 0;
 let diff, against = base;
 try {
   diff = git('diff', '-U0', `${base}...HEAD`, '--', FILE);
