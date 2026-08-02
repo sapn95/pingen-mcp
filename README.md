@@ -373,6 +373,7 @@ there is no credential, by design.
 ## Checks
 
     npm run gate
+    npm run mutate    # mutation-test the lines this branch changed
 
 Runs exactly what CI runs, offline and without credentials: a syntax check,
 ESLint, the protocol smoke test, the hygiene scan, and the test suite under
@@ -411,6 +412,25 @@ back. The gate fails below 90% line, 90% function and 80% branch coverage of
 `test/hygiene.test.mjs` points the hygiene scan at throwaway git repositories
 instead, because run over this repository — where everything is clean — a scan
 that silently skipped half the files would look exactly like one that worked.
+
+### Mutation testing
+
+`npm run mutate` asks a different question from everything above: not "do the
+tests pass" but "would they notice if a guard were removed". StrykerJS deletes
+one piece of behaviour at a time and reruns the suite; whatever survives is
+something no assertion is watching.
+
+That found eleven real gaps here after the model review rounds had stopped
+turning anything up — among them a path that walked out of the letters
+collection, a warning that went missing at exactly one HTTP status, and a page
+of one organisation being read as an account with one organisation. Most of the
+fixes were to the fixture rather than the code: a stand-in that accepts more
+than the real server does is a stand-in that hides the difference.
+
+There is no browser in this suite, so `npm run mutate:all` over the whole file
+is about forty minutes and worth running. `stryker.config.json` explains every
+setting that is not a default — including why incremental mode is off, and why
+the number to watch when tuning it is the timeout count rather than the score.
 
 ## License
 
