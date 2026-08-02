@@ -146,6 +146,50 @@ describe('the hygiene scan', () => {
     assert.ok(!/github\.com/.test(out), `an SSH remote was read as somebody's address:\n${out}`);
   });
 
+  test('an allowed domain worn as a suffix is not an allowed address', () => {
+    // In a file this is caught for a reason worth pinning down: what finds an
+    // address stops at the second @, so what the rule is handed is the real
+    // address alone and the permitted tail never reaches it. Widen that finder
+    // one day and the suffix becomes the bypass it is on the identity path,
+    // where the raw value goes straight to the rule — see the test below.
+    // Assembled rather than written down, for the reason the test above gives.
+    const LOCAL = 'a.person', DOMAIN = 'some-provider' + '.ch';
+    const { code, out } = scan(repo({ 'notes.txt': `reply came back from ${LOCAL}@${DOMAIN}@example.com instead\n` }));
+    assert.equal(code, 1, `an allowed domain as a suffix was accepted:\n${out}`);
+    assert.ok(out.includes(`email address at @${DOMAIN}`), `named the wrong domain:\n${out}`);
+  });
+
+  test('a committer identity that is not a hostname is not an allowed identity', () => {
+    // Only reachable here. The file scan never sees these, because what finds
+    // an address in a file will not accept a space or a slash inside a domain
+    // and so does not offer them up at all. The identity check has no such
+    // filter: it hands over whatever git recorded — and the check used to read
+    // only the tail of it, so an address with a permitted domain appended after
+    // a second @ was an allowed identity, while the subdomain part took any
+    // characters whatsoever in front of a permitted domain.
+    const LOCAL = 'a.person', DOMAIN = 'some-provider' + '.ch';
+    for (const bad of [
+      `${LOCAL}@${DOMAIN}@example.com`,     // a real address wearing an allowed one
+      `${LOCAL}@evil host.example.com`,     // a space is not a hostname label
+      `${LOCAL}@x/y.example.com`,           // and neither is a slash
+    ]) {
+      const dir = repo({ 'notes.txt': 'nothing of interest\n' });
+      const git = gitIn(dir);
+      git('config', 'user.email', bad);
+      git('commit', '-q', '--allow-empty', '-m', 'second');
+      const { code, out } = scan(dir);
+      assert.equal(code, 1, `${bad} was accepted as an identity:\n${out}`);
+      assert.match(out, /commit identity is not anonymous/, out);
+    }
+  });
+
+  test('a real subdomain of a permitted domain is still permitted', () => {
+    // The other half: tightening the rule must not start failing the ordinary
+    // case, or the next person loosens it back to where it started.
+    const { code, out } = scan(repo({ 'notes.txt': 'wrote to a.person@deep.sub.example.org and heard nothing\n' }));
+    assert.equal(code, 0, out);
+  });
+
   test('a denylisted name is caught in either normalisation', () => {
     // The terms that identify the author cannot live in this repository, so the
     // list is read from outside it. The names that leaked the first time came

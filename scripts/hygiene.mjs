@@ -34,11 +34,13 @@ const SECRETS = [
 // something permitted and was waved through, which is the whole thing this gate
 // exists to catch, sitting in plain sight. No example is written out here: an
 // address in a tracked file is what the scan is for, and a scanner that trips
-// over its own comment is one people switch off.
+// over its own comment is one people switch off. The subdomain part takes
+// hostname labels only: `.+` let a space or a slash sit in front of an
+// allowed domain, which is not a hostname and was never meant to pass.
 // noreply@github.com stays an exact address rather than a domain — it is what
 // the forge puts on the merge commit it builds for a pull request, and a real
 // @github.com address is a person.
-const MAIL_OK = /^(?:noreply@github\.com|[^@\s]+@(?:users\.noreply\.github\.com|anthropic\.com|(?:.+\.)?(?:example\.(?:com|org|net)|invalid|test|localhost)))$/;
+const MAIL_OK = /^(?:noreply@github\.com|[^@\s]+@(?:users\.noreply\.github\.com|anthropic\.com|(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|org|net)|invalid|test|localhost)))$/;
 
 // Personal detail that has no business in a public repo. Deliberately narrow on
 // the German side — these must not fire on ordinary words — and deliberately
