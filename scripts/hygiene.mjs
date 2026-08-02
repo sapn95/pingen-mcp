@@ -29,9 +29,12 @@ const SECRETS = [
 // The domain as a whole is not allowed: a real @github.com address is a
 // person.
 // Anchored at both ends, and the local part may not itself contain an @.
-// Matching only the tail let a real address wear an allowed one as a suffix:
-// real.person@sbb.ch@example.com ended in @example.com and was waved through,
-// which is the whole address this gate exists to catch, sitting in plain sight.
+// Matching only the tail let a real address wear an allowed one as a suffix —
+// a work address with an allowed domain appended after a second @ ends in
+// something permitted and was waved through, which is the whole thing this gate
+// exists to catch, sitting in plain sight. No example is written out here: an
+// address in a tracked file is what the scan is for, and a scanner that trips
+// over its own comment is one people switch off.
 // noreply@github.com stays an exact address rather than a domain — it is what
 // the forge puts on the merge commit it builds for a pull request, and a real
 // @github.com address is a person.
