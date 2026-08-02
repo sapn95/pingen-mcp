@@ -47,10 +47,20 @@ const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['
 // and reports a score for them. An explicit base is therefore an error if it
 // does not resolve, and only the default is allowed to fall back, out loud.
 const explicit = rest.length > 0;
+// Two different failures wore the same fallback. A base that does not exist is
+// one thing; a base that exists while the clone is too shallow to hold the
+// commit they share is another, and only the first is answered by passing a
+// different ref. Asked separately, so the message names the actual problem.
+const resolves = ref => { try { git('rev-parse', '--verify', `${ref}^{commit}`); return true; } catch { return false; } };
 let diff, against = base;
 try {
+  if (!resolves(base)) throw new Error('unresolved');
   diff = git('diff', '-U0', `${base}...HEAD`, '--', FILE);
 } catch {
+  if (resolves(base)) {
+    console.error(`${base} resolves, but no commit shared with HEAD could be found — a shallow clone cannot answer this. Fetch more history (git fetch --unshallow).`);
+    process.exit(2);
+  }
   if (explicit) {
     console.error(`Cannot compare ${FILE} against ${base}. Fetch that ref, or pass one that resolves.`);
     process.exit(2);

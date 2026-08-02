@@ -28,7 +28,14 @@ const SECRETS = [
 // choose — and it is anonymous, which is the only thing this check is about.
 // The domain as a whole is not allowed: a real @github.com address is a
 // person.
-const MAIL_OK = /(^noreply@github\.com$)|@(users\.noreply\.github\.com|anthropic\.com|(.+\.)?(example\.(com|org|net)|invalid|test|localhost))$/;
+// Anchored at both ends, and the local part may not itself contain an @.
+// Matching only the tail let a real address wear an allowed one as a suffix:
+// real.person@sbb.ch@example.com ended in @example.com and was waved through,
+// which is the whole address this gate exists to catch, sitting in plain sight.
+// noreply@github.com stays an exact address rather than a domain — it is what
+// the forge puts on the merge commit it builds for a pull request, and a real
+// @github.com address is a person.
+const MAIL_OK = /^(?:noreply@github\.com|[^@\s]+@(?:users\.noreply\.github\.com|anthropic\.com|(?:.+\.)?(?:example\.(?:com|org|net)|invalid|test|localhost)))$/;
 
 // Personal detail that has no business in a public repo. Deliberately narrow on
 // the German side — these must not fire on ordinary words — and deliberately
