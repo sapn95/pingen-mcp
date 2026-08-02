@@ -40,7 +40,7 @@ const SECRETS = [
 // noreply@github.com stays an exact address rather than a domain — it is what
 // the forge puts on the merge commit it builds for a pull request, and a real
 // @github.com address is a person.
-const MAIL_OK = /^(?:noreply@github\.com|[^@\s]+@(?:users\.noreply\.github\.com|anthropic\.com|(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|org|net)|invalid|test|localhost)))$/;
+const MAIL_OK = /^(?:noreply@github\.com|[^@\s]+@(?:users\.noreply\.github\.com|anthropic\.com|(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)*(?:example\.(?:com|org|net)|invalid|test|localhost)))$/;
 
 // Personal detail that has no business in a public repo. Deliberately narrow on
 // the German side — these must not fire on ordinary words — and deliberately
