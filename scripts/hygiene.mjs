@@ -22,7 +22,13 @@ const SECRETS = [
 // Addresses that may legitimately appear: the ones that identify nobody. The
 // reserved names come from RFC 2606 and RFC 6761 — they cannot resolve, which
 // is exactly why fixtures use them.
-const MAIL_OK = /@(users\.noreply\.github\.com|anthropic\.com|(.+\.)?(example\.(com|org|net)|invalid|test|localhost))$/;
+// noreply@github.com is listed by address rather than by domain on purpose.
+// It is the identity the forge puts on the merge commit it builds for a pull
+// request, which lands in the CI checkout under --all and is not ours to
+// choose — and it is anonymous, which is the only thing this check is about.
+// The domain as a whole is not allowed: a real @github.com address is a
+// person.
+const MAIL_OK = /(^noreply@github\.com$)|@(users\.noreply\.github\.com|anthropic\.com|(.+\.)?(example\.(com|org|net)|invalid|test|localhost))$/;
 
 // Personal detail that has no business in a public repo. Deliberately narrow on
 // the German side — these must not fire on ordinary words — and deliberately
