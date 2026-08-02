@@ -172,6 +172,8 @@ describe('the hygiene scan', () => {
       `${LOCAL}@${DOMAIN}@example.com`,     // a real address wearing an allowed one
       `${LOCAL}@evil host.example.com`,     // a space is not a hostname label
       `${LOCAL}@x/y.example.com`,           // and neither is a slash
+      `${LOCAL}@-.example.com`,             // a label may not begin with a hyphen
+      `${LOCAL}@host-.example.org`,         // nor end with one
     ]) {
       const dir = repo({ 'notes.txt': 'nothing of interest\n' });
       const git = gitIn(dir);
