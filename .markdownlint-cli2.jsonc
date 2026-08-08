@@ -1,0 +1,14 @@
+{
+  "config": {
+    // Prose here is hard-wrapped for the diff, not for a column counter.
+    "MD013": false,
+    // Headings repeat across sections that describe one tool each.
+    "MD024": { "siblings_only": true },
+    // The README opens with a centred header block, which is HTML because
+    // Markdown has no way to centre anything.
+    "MD033": false,
+    "MD041": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules", "coverage"]
+}

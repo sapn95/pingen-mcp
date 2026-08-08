@@ -1,0 +1,19 @@
+extends: default
+
+rules:
+  # Workflow YAML has long lines by nature, and wrapping a `run:` command to
+  # satisfy a linter is how a working command becomes a broken one.
+  line-length:
+    max: 120
+    level: warning
+  # `on:` in a workflow is the trigger block, not the boolean.
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  # GitHub's own workflow examples carry no `---`, and neither do these files.
+  document-start: disable
+
+ignore: |
+  node_modules/
+  coverage/
