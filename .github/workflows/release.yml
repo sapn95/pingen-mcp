@@ -1,5 +1,3 @@
-name: Release
-
 # Publishing uses npm Trusted Publishing (OIDC): the runner proves its identity
 # to the registry and gets a short-lived, signed token per publish. There is no
 # npm token anywhere — nothing to store, rotate, or leak. npm itself recommends
@@ -13,53 +11,91 @@ name: Release
 #   Allowed actions:      npm publish
 #
 # Then release with:  npm version patch && git push --follow-tags
+#
+# Shape and conventions: https://github.com/sapn95/.github/blob/main/CI.md
+name: release
+
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default. The one job that needs to write says so itself.
 permissions:
-  contents: write        # to publish the GitHub Release for the tag
-  id-token: write        # lets the runner mint the OIDC token npm verifies
+  contents: read
+
+concurrency:
+  # Never cancel a release in progress: a run stopped between publishing to the
+  # registry and creating the GitHub Release leaves a version nobody can find.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  guard:
+    name: the tag agrees with package.json
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
         with:
-          node-version: '22'          # trusted publishing needs >= 22.14
-          registry-url: https://registry.npmjs.org
-          cache: npm
-
-      # Trusted publishing needs npm >= 11.5.1; the bundled npm may be older.
-      - name: Ensure a recent npm
-        run: |
-          npm install -g npm@latest
-          npm --version
-
-      - run: npm ci --ignore-scripts
-
-      # Refuse to publish a tag whose version does not match package.json —
-      # a tag and a published version that disagree can never be reconciled.
-      - name: Tag matches package.json
+          persist-credentials: false
+      # A tag and a published version that disagree can never be reconciled:
+      # npm will not let the version be republished, and the tag cannot be
+      # moved once anyone has fetched it.
+      - name: compare
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p 'require("./package.json").version')"
           test "$tag" = "$pkg" || { echo "tag $tag != package.json $pkg"; exit 1; }
 
-      - name: Gate
+  publish:
+    name: publish to npm
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # to publish the GitHub Release for the tag
+      id-token: write # lets the runner mint the OIDC token npm verifies
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The release notes below start at the previous tag, and `git
+          # describe` cannot find one in a shallow clone — which is why that
+          # command has always fallen through to its own fallback.
+          fetch-depth: 0
+          # Nothing pushes with git here: the release is created through gh
+          # with the job token, and npm publish authenticates over OIDC.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # Trusted publishing needs Node >= 22.14; this is simply the current
+          # release, which is comfortably past that.
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted publishing needs npm >= 11.5.1; the bundled npm may be older.
+      - name: a recent enough npm
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - run: npm ci --ignore-scripts
+
+      # The whole gate in one command here, unlike CI: a publish cannot be
+      # taken back, and there is nothing to diagnose at a glance on a release.
+      - name: the gate
         run: npm run gate
 
-      - name: Publish
+      - name: publish
         run: npm publish
 
       # A tag alone is invisible on the repo page: GitHub only shows a Release.
       # Create one from the tag so the published version is discoverable from
-      # GitHub as well as from the registry, rather than only in npm.
-      - name: GitHub Release
+      # GitHub as well as from the registry.
+      - name: github release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -72,4 +108,5 @@ jobs:
             --latest \
             --notes-start-tag "$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || echo '')" \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --latest
-          echo "https://www.npmjs.com/package/$(node -p 'require("./package.json").name')/v/$version" >> "$GITHUB_STEP_SUMMARY"
+          name="$(node -p 'require("./package.json").name')"
+          echo "https://www.npmjs.com/package/$name/v/$version" >> "$GITHUB_STEP_SUMMARY"
