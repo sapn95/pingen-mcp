@@ -87,6 +87,11 @@ jobs:
           persist-credentials: false
       - name: actionlint
         uses: raven-actions/actionlint@v2.2.0
+        env:
+          # shellcheck's info and style notes are advisory here; a warning or
+          # worse blocks. The same setting in every repository, so the same
+          # command means the same thing everywhere.
+          SHELLCHECK_OPTS: --severity=warning
       - name: yamllint
         run: pipx run yamllint .
       - name: markdownlint
