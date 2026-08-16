@@ -130,9 +130,23 @@ jobs:
             # check runs on the same commit, and the one doing the waiting can
             # never be green before it merges — so a pull request whose only
             # unhappy check is this job is a pull request that is ready.
-            others="$(gh pr checks "$PR" --repo "$REPO" --json name,state --jq '
-              [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                    | select(.state != "SUCCESS" and .state != "SKIPPED") ] | length' || true)"
+            # bucket, not state: state is whatever GitHub happens to call it,
+            # and it does not call it one thing — a check run and a commit
+            # status posted by an app report different words for the same idea.
+            # bucket is gh's own normalisation into pass / fail / pending /
+            # skipping / cancel, which is the question being asked here. Only
+            # pass and skipping count as through, so a cancelled check holds
+            # the pull request open rather than being waved past.
+            #
+            # And whose check: excluding by name alone would also skip a check
+            # called auto-merge that belongs to some other workflow, and a red
+            # one of those would be waved through. $GITHUB_WORKFLOW is this
+            # workflow's own name, so renaming it does not quietly break the
+            # match.
+            others="$(gh pr checks "$PR" --repo "$REPO" --json name,workflow,bucket \
+              | jq --arg wf "$GITHUB_WORKFLOW" '
+              [ .[] | select((.workflow == $wf and (.name == "auto-merge" or .name == "reconcile")) | not)
+                    | select(.bucket != "pass" and .bucket != "skipping") ] | length' || true)"
             case "$state" in
               CLEAN)
                 echo "green=true" >> "$GITHUB_OUTPUT"
@@ -155,9 +169,10 @@ jobs:
             # BLOCKED means both "a required check has not finished" and "one
             # of them failed", so ask the checks themselves whether anything is
             # already red rather than polling a lost cause for half an hour.
-            failed="$(gh pr checks "$PR" --repo "$REPO" --json name,state --jq '
-              [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                    | select(.state == "FAILURE") ] | length' || true)"
+            failed="$(gh pr checks "$PR" --repo "$REPO" --json name,workflow,bucket \
+              | jq --arg wf "$GITHUB_WORKFLOW" '
+              [ .[] | select((.workflow == $wf and (.name == "auto-merge" or .name == "reconcile")) | not)
+                    | select(.bucket == "fail") ] | length' || true)"
             if [ -n "$failed" ] && [ "$failed" != "0" ]; then
               echo "::notice::$failed check(s) red on this commit — leaving the pull request open."
               echo "green=false" >> "$GITHUB_OUTPUT"
@@ -224,9 +239,10 @@ jobs:
             # UNSTABLE counts too when the only unhappy check is this workflow's
             # own — see the same reasoning in the auto-merge job above.
             if [ "$state" = 'UNSTABLE' ]; then
-              others="$(gh pr checks "$pr" --repo "$REPO" --json name,state </dev/null --jq '
-                [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                      | select(.state != "SUCCESS" and .state != "SKIPPED") ] | length' || true)"
+              others="$(gh pr checks "$pr" --repo "$REPO" --json name,workflow,bucket </dev/null \
+                | jq --arg wf "$GITHUB_WORKFLOW" '
+                [ .[] | select((.workflow == $wf and (.name == "auto-merge" or .name == "reconcile")) | not)
+                      | select(.bucket != "pass" and .bucket != "skipping") ] | length' || true)"
               [ "${others:-1}" = "0" ] && state=CLEAN
             fi
             if [ "$state" = 'CLEAN' ]; then
