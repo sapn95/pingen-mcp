@@ -130,9 +130,16 @@ jobs:
             # check runs on the same commit, and the one doing the waiting can
             # never be green before it merges — so a pull request whose only
             # unhappy check is this job is a pull request that is ready.
-            others="$(gh pr checks "$PR" --repo "$REPO" --json name,state --jq '
+            # bucket, not state: state is whatever GitHub called it, and it
+            # calls it different things for a check run than for a commit
+            # status posted by an app. bucket is gh's own normalisation into
+            # pass / fail / pending / skipping / cancel, which is the question
+            # being asked. Only pass and skipping count as through — a
+            # cancelled check did not pass, so it holds the pull request open
+            # rather than being waved past.
+            others="$(gh pr checks "$PR" --repo "$REPO" --json name,bucket --jq '
               [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                    | select(.state != "SUCCESS" and .state != "SKIPPED") ] | length' || true)"
+                    | select(.bucket != "pass" and .bucket != "skipping") ] | length' || true)"
             case "$state" in
               CLEAN)
                 echo "green=true" >> "$GITHUB_OUTPUT"
@@ -155,9 +162,9 @@ jobs:
             # BLOCKED means both "a required check has not finished" and "one
             # of them failed", so ask the checks themselves whether anything is
             # already red rather than polling a lost cause for half an hour.
-            failed="$(gh pr checks "$PR" --repo "$REPO" --json name,state --jq '
+            failed="$(gh pr checks "$PR" --repo "$REPO" --json name,bucket --jq '
               [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                    | select(.state == "FAILURE") ] | length' || true)"
+                    | select(.bucket == "fail") ] | length' || true)"
             if [ -n "$failed" ] && [ "$failed" != "0" ]; then
               echo "::notice::$failed check(s) red on this commit — leaving the pull request open."
               echo "green=false" >> "$GITHUB_OUTPUT"
@@ -224,9 +231,9 @@ jobs:
             # UNSTABLE counts too when the only unhappy check is this workflow's
             # own — see the same reasoning in the auto-merge job above.
             if [ "$state" = 'UNSTABLE' ]; then
-              others="$(gh pr checks "$pr" --repo "$REPO" --json name,state </dev/null --jq '
+              others="$(gh pr checks "$pr" --repo "$REPO" --json name,bucket </dev/null --jq '
                 [ .[] | select(.name != "auto-merge" and .name != "reconcile")
-                      | select(.state != "SUCCESS" and .state != "SKIPPED") ] | length' || true)"
+                      | select(.bucket != "pass" and .bucket != "skipping") ] | length' || true)"
               [ "${others:-1}" = "0" ] && state=CLEAN
             fi
             if [ "$state" = 'CLEAN' ]; then
